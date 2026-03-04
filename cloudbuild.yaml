@@ -37,7 +37,7 @@ steps:
       - |
         TAG=$(cat /workspace/_tag.txt)
         docker build \
-          -t gcr.io/$PROJECT_ID/${_SERVICE_NAME}:$$TAG \
+          -t gcr.io/$PROJECT_ID/${_SERVICE_NAME}:${TAG} \
           -t gcr.io/$PROJECT_ID/${_SERVICE_NAME}:latest \
           .
 
@@ -48,7 +48,7 @@ steps:
       - '-c'
       - |
         TAG=$(cat /workspace/_tag.txt)
-        docker push gcr.io/$PROJECT_ID/${_SERVICE_NAME}:$$TAG
+        docker push gcr.io/$PROJECT_ID/${_SERVICE_NAME}:${TAG}
         docker push gcr.io/$PROJECT_ID/${_SERVICE_NAME}:latest
 
   # 3. Cloud Run にデプロイ
@@ -59,7 +59,7 @@ steps:
       - |
         TAG=$(cat /workspace/_tag.txt)
         gcloud run deploy ${_SERVICE_NAME} \
-          --image=gcr.io/$PROJECT_ID/${_SERVICE_NAME}:$$TAG \
+          --image=gcr.io/$PROJECT_ID/${_SERVICE_NAME}:${TAG} \
           --region=${_REGION} \
           --platform=managed \
           --memory=${_MEMORY} \
