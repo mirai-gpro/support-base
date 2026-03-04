@@ -559,18 +559,20 @@ class SupportAssistant:
             logger.info("[Assistant] Google検索グラウンディングを有効化")
 
         try:
+            # Gemini クライアントの存在確認
+            if gemini_client is None:
+                raise RuntimeError(
+                    "GEMINI_API_KEY が未設定です。Cloud Run の環境変数を確認してください。"
+                )
+
             logger.info(f"[Assistant] Gemini API呼び出し開始: 履歴={len(history)}件")
 
-            # ---------------------------------------------------------
-            # 【修正箇所】ここを書き換えてください
-            # ---------------------------------------------------------
             # 【重要】configパラメータの設定
             # Google検索(tools)を使う場合は、response_mime_type="application/json" を
             # 指定してはいけません（400エラーの原因になります）。
             config = types.GenerateContentConfig(
                 system_instruction=system_prompt if system_prompt else None,
                 tools=tools if tools else None,
-                # response_mime_type="application/json"  # ← ★必ずコメントアウト（先頭に # をつける）
             )
 
             response = gemini_client.models.generate_content(
@@ -578,7 +580,6 @@ class SupportAssistant:
                 contents=history,
                 config=config
             )
-            # ---------------------------------------------------------
 
             logger.info("[Assistant] Gemini API呼び出し完了")
 
@@ -632,14 +633,11 @@ class SupportAssistant:
 
         except Exception as e:
             logger.error(f"[Assistant] Gemini API error: {e}", exc_info=True)
-            error_messages = {
-                'ja': 'エラーが発生しました。もう一度お試しください。',
-                'en': 'An error occurred. Please try again.',
-                'zh': '発生錯誤。請重試。',
-                'ko': '$C624$B958$AC00 $BC1C$C0DD$D588$C2B5$B2C8$B2E4. $B2E4$C2DC $C2DC$B3C4$D574$C8FC$C138$C694.'
-            }
+            # エラー詳細をレスポンスに含める（デバッグ用）
+            error_detail = f"{type(e).__name__}: {str(e)[:200]}"
+            logger.error(f"[Assistant] Error detail: {error_detail}")
             return {
-                'response': error_messages.get(self.language, error_messages['ja']),
+                'response': f"エラーが発生しました: {error_detail}",
                 'summary': None,
                 'shops': [],
                 'should_confirm': False,

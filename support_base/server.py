@@ -36,6 +36,7 @@ from support_base.services.a2e_client import A2EClient
 from support_base.session.manager import SessionManager
 from support_base.live.relay import LiveRelay
 from support_base.rest.router import router as rest_router
+from support_base.core.support_core import gemini_client
 
 logger = logging.getLogger(__name__)
 
@@ -131,6 +132,7 @@ class HealthResponse(BaseModel):
     modes: list[dict]
     a2e_available: bool
     active_sessions: int
+    gemini_api_configured: bool = False
 
 
 # === REST エンドポイント ===
@@ -204,6 +206,7 @@ async def health_check():
         modes=mode_registry.list_modes(),
         a2e_available=a2e_available,
         active_sessions=len(session_manager.list_sessions()),
+        gemini_api_configured=gemini_client is not None,
     )
 
 
