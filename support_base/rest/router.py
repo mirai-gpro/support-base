@@ -477,15 +477,39 @@ async def rest_tts_synthesize(req: TTSRequest):
             logger.info("[Audio2Exp] Not configured: A2E_SERVICE_URL not set")
         else:
             try:
+                # LINEAR16 (PCM) を A2E 用に生成（MP3より処理が安定）
+                a2e_audio_config = texttospeech.AudioConfig(
+                    audio_encoding=texttospeech.AudioEncoding.LINEAR16,
+                    sample_rate_hertz=24000,
+                    speaking_rate=req.speaking_rate,
+                    pitch=req.pitch,
+                )
+                a2e_response = tts_client.synthesize_speech(
+                    input=synthesis_input, voice=voice, audio_config=a2e_audio_config
+                )
+                a2e_audio_b64 = base64.b64encode(a2e_response.audio_content).decode("utf-8")
                 logger.info(
-                    f"[Audio2Exp] Calling A2E: "
+                    f"[Audio2Exp] Calling A2E with PCM: "
                     f"client={'shared' if _a2e_client else 'fallback'}, "
-                    f"audio_size={len(audio_base64) * 3 // 4 // 1024}KB, "
+                    f"audio_size={len(a2e_audio_b64) * 3 // 4 // 1024}KB, "
                     f"session={req.session_id}"
                 )
-                expression_data = await _get_expression_frames(
-                    audio_base64, req.session_id, "mp3"
-                )
+
+                # リトライ付き A2E 呼び出し（最大2回）
+                for attempt in range(2):
+                    expression_data = await _get_expression_frames(
+                        a2e_audio_b64, req.session_id, "pcm"
+                    )
+                    if expression_data:
+                        break
+                    if attempt == 0:
+                        logger.warning(
+                            f"[Audio2Exp] Retry A2E: attempt 1 failed, "
+                            f"session={req.session_id}"
+                        )
+                        import asyncio
+                        await asyncio.sleep(0.5)
+
                 expression_status = "ok" if expression_data else "error"
                 if expression_data:
                     frame_count = len(expression_data.get("frames", []))
@@ -495,7 +519,7 @@ async def rest_tts_synthesize(req: TTSRequest):
                     )
                 else:
                     logger.warning(
-                        f"[Audio2Exp] No expression data returned: "
+                        f"[Audio2Exp] No expression data after retries: "
                         f"session={req.session_id}"
                     )
             except Exception as e:

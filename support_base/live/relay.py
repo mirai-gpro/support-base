@@ -328,12 +328,13 @@ class LiveRelay:
                                 self.state.a2e_chunk_buffer.extend(audio_data)
                                 self.state.a2e_total_bytes += len(audio_data)
 
-                                # 1秒分（48000 bytes = 24kHz * 16bit * 1ch）溜まったら
+                                # 0.75秒分（36000 bytes = 24kHz * 16bit * 0.75s）溜まったら
                                 # expression チャンクを非同期で生成・送信
-                                BYTES_PER_SEC = 24000 * 2
-                                if len(self.state.a2e_chunk_buffer) >= BYTES_PER_SEC:
+                                # (1.0s→0.75sに縮小: 初期遅延を500ms→250ms程度に改善)
+                                A2E_CHUNK_BYTES = 24000 * 2 * 3 // 4  # 36000
+                                if len(self.state.a2e_chunk_buffer) >= A2E_CHUNK_BYTES:
                                     chunk = bytes(self.state.a2e_chunk_buffer)
-                                    is_first = self.state.a2e_total_bytes <= BYTES_PER_SEC * 2
+                                    is_first = self.state.a2e_total_bytes <= A2E_CHUNK_BYTES * 2
                                     self.state.a2e_chunk_buffer = bytearray()
                                     asyncio.create_task(
                                         self._send_expression_chunk(
@@ -395,6 +396,12 @@ class LiveRelay:
         if self.a2e_client and len(self.state.a2e_chunk_buffer) > 0:
             chunk = bytes(self.state.a2e_chunk_buffer)
             self.state.a2e_chunk_buffer = bytearray()
+
+            # 短すぎるチャンクは無音でパディング（最低0.25秒 = 12000bytes）
+            MIN_CHUNK_BYTES = 24000 * 2 // 4  # 12000 bytes = 0.25s
+            if len(chunk) < MIN_CHUNK_BYTES:
+                chunk = chunk + b'\x00' * (MIN_CHUNK_BYTES - len(chunk))
+
             await self._send_expression_chunk(
                 client_ws, chunk, is_final=True,
             )
