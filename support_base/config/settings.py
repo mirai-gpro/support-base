@@ -20,8 +20,8 @@ MAX_AI_CHARS_BEFORE_RECONNECT = 800
 LONG_SPEECH_THRESHOLD = 500
 RECONNECT_DELAY_SECONDS = 3
 
-# audio2exp-service
-A2E_SERVICE_URL = os.getenv("A2E_SERVICE_URL", "https://audio2exp-service-XXXXX.run.app")
+# audio2exp-service (AUDIO2EXP_SERVICE_URL も互換性のため受け付ける)
+A2E_SERVICE_URL = os.getenv("A2E_SERVICE_URL") or os.getenv("AUDIO2EXP_SERVICE_URL") or ""
 A2E_TIMEOUT_SECONDS = 10
 
 # Google Cloud TTS
