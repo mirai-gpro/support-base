@@ -57,8 +57,10 @@ class LiveRelayState:
     """LiveRelay の内部状態"""
     user_transcript_buffer: str = ""
     ai_transcript_buffer: str = ""
-    ai_audio_buffer: bytearray = field(default_factory=bytearray)
     is_running: bool = True
+    # Expression ストリーミング用
+    a2e_chunk_buffer: bytearray = field(default_factory=bytearray)
+    a2e_total_bytes: int = 0  # ターン内の累計音声バイト数
 
 
 class LiveRelay:
@@ -142,7 +144,8 @@ class LiveRelay:
         # 状態リセット
         self.state.user_transcript_buffer = ""
         self.state.ai_transcript_buffer = ""
-        self.state.ai_audio_buffer = bytearray()
+        self.state.a2e_chunk_buffer = bytearray()
+        self.state.a2e_total_bytes = 0
 
         async with self._gemini_client.aio.live.connect(
             model=LIVE_API_MODEL,
@@ -281,7 +284,8 @@ class LiveRelay:
                             "AI", self.state.ai_transcript_buffer.strip()
                         )
                     self.state.ai_transcript_buffer = ""
-                    self.state.ai_audio_buffer = bytearray()
+                    self.state.a2e_chunk_buffer = bytearray()
+                    self.state.a2e_total_bytes = 0
                     await self._send_json(client_ws, {"type": "interrupted"})
                     continue
 
@@ -320,8 +324,23 @@ class LiveRelay:
                                     "type": "audio",
                                     "data": base64.b64encode(audio_data).decode(),
                                 })
-                                # A2E用にバッファに蓄積
-                                self.state.ai_audio_buffer.extend(audio_data)
+                                # A2E用にバッファに蓄積（ストリーミング）
+                                self.state.a2e_chunk_buffer.extend(audio_data)
+                                self.state.a2e_total_bytes += len(audio_data)
+
+                                # 1秒分（48000 bytes = 24kHz * 16bit * 1ch）溜まったら
+                                # expression チャンクを非同期で生成・送信
+                                BYTES_PER_SEC = 24000 * 2
+                                if len(self.state.a2e_chunk_buffer) >= BYTES_PER_SEC:
+                                    chunk = bytes(self.state.a2e_chunk_buffer)
+                                    is_first = self.state.a2e_total_bytes <= BYTES_PER_SEC * 2
+                                    self.state.a2e_chunk_buffer = bytearray()
+                                    asyncio.create_task(
+                                        self._send_expression_chunk(
+                                            client_ws, chunk,
+                                            is_first=is_first,
+                                        )
+                                    )
 
                 # --- ターン完了 (stt_stream.py L600-645) ---
                 if hasattr(sc, "turn_complete") and sc.turn_complete:
@@ -372,34 +391,35 @@ class LiveRelay:
         self.state.ai_transcript_buffer = ""
 
         # --- A2E → Expression（アバター連携） ---
-        # AI音声をA2Eサービスに送信し、表情データをブラウザに中継
-        # LAMAvatarController の frameBuffer に投入される
-        if self.a2e_client and len(self.state.ai_audio_buffer) > 0:
-            asyncio.create_task(
-                self._process_a2e_and_send(
-                    client_ws,
-                    bytes(self.state.ai_audio_buffer),
-                )
+        # 残りのバッファをフラッシュ（最後のチャンク）
+        if self.a2e_client and len(self.state.a2e_chunk_buffer) > 0:
+            chunk = bytes(self.state.a2e_chunk_buffer)
+            self.state.a2e_chunk_buffer = bytearray()
+            await self._send_expression_chunk(
+                client_ws, chunk, is_final=True,
             )
-        self.state.ai_audio_buffer = bytearray()
+        self.state.a2e_total_bytes = 0
 
-    async def _process_a2e_and_send(
-        self, client_ws: WebSocket, audio_pcm: bytes
+    async def _send_expression_chunk(
+        self,
+        client_ws: WebSocket,
+        audio_chunk: bytes,
+        is_first: bool = False,
+        is_final: bool = False,
     ) -> None:
         """
-        A2E推論 + Expression送信（非同期・音声再生と並行）
+        音声チャンクから expression を生成してクライアントへ送信（ストリーミング対応）
 
-        Live API 出力の PCM 24kHz 音声を A2E サービスに送信し、
-        52次元ARKitブレンドシェイプをブラウザに中継する。
-        ブラウザ側の LAMAvatarController がこれを frameBuffer にキューして
-        音声再生と同期してアバターを動かす。
+        1秒ごとの音声チャンクを audio2exp に送信し、結果を即座にクライアントへ転送する。
+        フロントエンドの queueLiveExpressionFrames() がバッファに追加して再生する。
         """
         try:
-            audio_b64 = base64.b64encode(audio_pcm).decode()
-            pcm_duration_ms = len(audio_pcm) // (24000 * 2) * 1000  # 24kHz 16bit mono
+            audio_b64 = base64.b64encode(audio_chunk).decode()
+            pcm_duration_ms = len(audio_chunk) // (24000 * 2) * 1000
             logger.info(
-                f"[LiveRelay] A2E request: "
-                f"{len(audio_pcm)} bytes (~{pcm_duration_ms}ms), "
+                f"[LiveRelay] A2E chunk: "
+                f"{len(audio_chunk)} bytes (~{pcm_duration_ms}ms), "
+                f"is_first={is_first}, is_final={is_final}, "
                 f"session={self.session.session_id}"
             )
             result = await self.a2e_client.process_audio(
@@ -407,9 +427,10 @@ class LiveRelay:
                 session_id=self.session.session_id,
                 audio_format="pcm",
                 sample_rate=24000,
+                is_start=is_first,
+                is_final=is_final,
             )
             if result and result.frames:
-                # 非ゼロフレーム検出（デバッグ用）
                 non_zero = sum(
                     1 for f in result.frames if any(v > 0.001 for v in f)
                 )
@@ -422,17 +443,17 @@ class LiveRelay:
                     },
                 })
                 logger.info(
-                    f"[LiveRelay] Expression sent: "
+                    f"[LiveRelay] Expression chunk sent: "
                     f"{len(result.frames)} frames "
                     f"({non_zero} non-zero)"
                 )
             else:
                 logger.warning(
-                    f"[LiveRelay] A2E returned no frames: "
+                    f"[LiveRelay] A2E chunk returned no frames: "
                     f"session={self.session.session_id}"
                 )
         except Exception as e:
-            logger.warning(f"[LiveRelay] A2E failed (non-fatal): {e}")
+            logger.warning(f"[LiveRelay] A2E chunk error (non-fatal): {e}")
 
     def _build_live_config(self, context: str | None = None) -> dict:
         """
