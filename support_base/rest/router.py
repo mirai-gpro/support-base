@@ -137,7 +137,12 @@ def _normalize_mode(mode: str) -> str:
 
 # === ヘルパー ===
 
-async def _get_expression_frames(audio_base64: str, session_id: str, audio_format: str = "mp3"):
+async def _get_expression_frames(
+    audio_base64: str,
+    session_id: str,
+    audio_format: str = "mp3",
+    sample_rate: int | None = None,
+):
     """
     Audio2Expression サービスから表情フレームを取得
 
@@ -151,6 +156,7 @@ async def _get_expression_frames(audio_base64: str, session_id: str, audio_forma
                 audio_base64=audio_base64,
                 session_id=session_id,
                 audio_format=audio_format,
+                sample_rate=sample_rate,
             )
             if result and result.frames:
                 return {
@@ -519,7 +525,7 @@ async def rest_tts_synthesize(req: TTSRequest):
                 # リトライ付き A2E 呼び出し（最大2回）
                 for attempt in range(2):
                     expression_data = await _get_expression_frames(
-                        a2e_audio_b64, req.session_id, "pcm"
+                        a2e_audio_b64, req.session_id, "pcm", sample_rate=24000
                     )
                     if expression_data:
                         break
