@@ -16,58 +16,37 @@ substitutions:
   _MEMORY: 1Gi
 
 steps:
-  # 0. SHORT_SHA を生成 (手動 submit 対応)
-  - name: 'gcr.io/cloud-builders/git'
-    entrypoint: 'bash'
-    args:
-      - '-c'
-      - |
-        if [ -z "$SHORT_SHA" ]; then
-          echo "$(date +%Y%m%d-%H%M%S)" > /workspace/_tag.txt
-        else
-          echo "$SHORT_SHA" > /workspace/_tag.txt
-        fi
-        echo "Image tag: $(cat /workspace/_tag.txt)"
-
   # 1. Docker イメージビルド
   - name: 'gcr.io/cloud-builders/docker'
-    entrypoint: 'bash'
     args:
-      - '-c'
-      - |
-        TAG=$(cat /workspace/_tag.txt)
-        docker build \
-          -t gcr.io/$PROJECT_ID/${_SERVICE_NAME}:$$TAG \
-          -t gcr.io/$PROJECT_ID/${_SERVICE_NAME}:latest \
-          .
+      - 'build'
+      - '-t'
+      - 'gcr.io/$PROJECT_ID/${_SERVICE_NAME}:latest'
+      - '.'
 
   # 2. Container Registry にプッシュ
   - name: 'gcr.io/cloud-builders/docker'
-    entrypoint: 'bash'
     args:
-      - '-c'
-      - |
-        TAG=$(cat /workspace/_tag.txt)
-        docker push gcr.io/$PROJECT_ID/${_SERVICE_NAME}:$$TAG
-        docker push gcr.io/$PROJECT_ID/${_SERVICE_NAME}:latest
+      - 'push'
+      - 'gcr.io/$PROJECT_ID/${_SERVICE_NAME}:latest'
 
   # 3. Cloud Run にデプロイ
   - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
-    entrypoint: 'bash'
     args:
-      - '-c'
-      - |
-        TAG=$(cat /workspace/_tag.txt)
-        gcloud run deploy ${_SERVICE_NAME} \
-          --image=gcr.io/$PROJECT_ID/${_SERVICE_NAME}:$$TAG \
-          --region=${_REGION} \
-          --platform=managed \
-          --memory=${_MEMORY} \
-          --port=8080 \
-          --allow-unauthenticated \
-          --session-affinity \
-          --timeout=3600 \
-          --min-instances=1
+      - 'gcloud'
+      - 'run'
+      - 'deploy'
+      - '${_SERVICE_NAME}'
+      - '--image=gcr.io/$PROJECT_ID/${_SERVICE_NAME}:latest'
+      - '--region=${_REGION}'
+      - '--platform=managed'
+      - '--memory=${_MEMORY}'
+      - '--port=8080'
+      - '--allow-unauthenticated'
+      - '--session-affinity'
+      - '--timeout=3600'
+      - '--min-instances=1'
+      - '--set-env-vars=GEMINI_API_KEY=AIzaSyALLYdnEAXfjk7q_mVBZRGeWRMBTtRrWHI,PROMPTS_BUCKET_NAME=hp-support-477512-prompts,GOOGLE_PLACES_API_KEY=AIzaSyCGqO4DE9uOMDgN-yRMSZ7qNFCYn-P3k3I,HOTPEPPER_API_KEY=c22031a566715e40,TRIPADVISOR_API_KEY=14516430BFB74E94A198B967C4DDD17F,SUPABASE_URL=https://bisguyfngvlpcgagrdmr.supabase.co,SUPABASE_KEY=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImJpc2d1eWZuZ3ZscGNnYWdyZG1yIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc2NjcxMDQxMCwiZXhwIjoyMDgyMjg2NDEwfQ.WS4Uf9BrzuLQWZKpMw30K5EDLcEivwfM3G-TnL90Fnw,AUDIO2EXP_SERVICE_URL=https://audio2exp-service-6s2ds5mdba-uc.a.run.app'
 
 images:
   - 'gcr.io/$PROJECT_ID/${_SERVICE_NAME}:latest'

@@ -64,6 +64,10 @@ from support_base.config.settings import A2E_SERVICE_URL
 
 _a2e_client = None  # A2EClient instance (set by server.py)
 
+# 挨拶TTS+Expressionキャッシュ（起動後の初回呼び出し時に生成、以降再利用）
+# key: (text, voice_name) → value: {"audio": base64, "expression": dict, "expression_status": str}
+_greeting_cache: dict[tuple[str, str], dict] = {}
+
 
 def set_a2e_client(client) -> None:
     """server.py からA2Eクライアントを注入"""
@@ -423,12 +427,22 @@ async def rest_cancel(req: CancelRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+def _is_greeting_text(text: str) -> bool:
+    """挨拶定型文かどうか判定"""
+    for mode_greetings in INITIAL_GREETINGS.values():
+        for greeting in mode_greetings.values():
+            if text.strip() == greeting.strip():
+                return True
+    return False
+
+
 @router.post("/tts/synthesize")
 async def rest_tts_synthesize(req: TTSRequest):
     """
     音声合成 (Google Cloud TTS) + Audio2Expression
 
     gourmet-support の /api/tts/synthesize と互換。
+    挨拶定型文はキャッシュして即時返却（TTS+A2E呼び出しを省略）。
     """
     if not TTS_STT_ENABLED:
         raise HTTPException(status_code=503, detail="TTS service not available")
@@ -437,6 +451,13 @@ async def rest_tts_synthesize(req: TTSRequest):
         text = req.text
         if not text:
             raise HTTPException(status_code=400, detail="text is required")
+
+        # === 挨拶キャッシュ ===
+        cache_key = (text.strip(), req.voice_name)
+        if _is_greeting_text(text) and cache_key in _greeting_cache:
+            cached = _greeting_cache[cache_key]
+            logger.info(f"[TTS] Greeting cache hit: voice={req.voice_name}")
+            return cached
 
         MAX_CHARS = 1000
         if len(text) > MAX_CHARS:
@@ -477,15 +498,39 @@ async def rest_tts_synthesize(req: TTSRequest):
             logger.info("[Audio2Exp] Not configured: A2E_SERVICE_URL not set")
         else:
             try:
+                # LINEAR16 (PCM) を A2E 用に生成（MP3より処理が安定）
+                a2e_audio_config = texttospeech.AudioConfig(
+                    audio_encoding=texttospeech.AudioEncoding.LINEAR16,
+                    sample_rate_hertz=24000,
+                    speaking_rate=req.speaking_rate,
+                    pitch=req.pitch,
+                )
+                a2e_response = tts_client.synthesize_speech(
+                    input=synthesis_input, voice=voice, audio_config=a2e_audio_config
+                )
+                a2e_audio_b64 = base64.b64encode(a2e_response.audio_content).decode("utf-8")
                 logger.info(
-                    f"[Audio2Exp] Calling A2E: "
+                    f"[Audio2Exp] Calling A2E with PCM: "
                     f"client={'shared' if _a2e_client else 'fallback'}, "
-                    f"audio_size={len(audio_base64) * 3 // 4 // 1024}KB, "
+                    f"audio_size={len(a2e_audio_b64) * 3 // 4 // 1024}KB, "
                     f"session={req.session_id}"
                 )
-                expression_data = await _get_expression_frames(
-                    audio_base64, req.session_id, "mp3"
-                )
+
+                # リトライ付き A2E 呼び出し（最大2回）
+                for attempt in range(2):
+                    expression_data = await _get_expression_frames(
+                        a2e_audio_b64, req.session_id, "pcm"
+                    )
+                    if expression_data:
+                        break
+                    if attempt == 0:
+                        logger.warning(
+                            f"[Audio2Exp] Retry A2E: attempt 1 failed, "
+                            f"session={req.session_id}"
+                        )
+                        import asyncio
+                        await asyncio.sleep(0.5)
+
                 expression_status = "ok" if expression_data else "error"
                 if expression_data:
                     frame_count = len(expression_data.get("frames", []))
@@ -495,7 +540,7 @@ async def rest_tts_synthesize(req: TTSRequest):
                     )
                 else:
                     logger.warning(
-                        f"[Audio2Exp] No expression data returned: "
+                        f"[Audio2Exp] No expression data after retries: "
                         f"session={req.session_id}"
                     )
             except Exception as e:
@@ -505,6 +550,14 @@ async def rest_tts_synthesize(req: TTSRequest):
         result = {"success": True, "audio": audio_base64, "expression_status": expression_status}
         if expression_data:
             result["expression"] = expression_data
+
+        # === 挨拶キャッシュに保存（成功時のみ） ===
+        if _is_greeting_text(req.text) and expression_status in ("ok", "skipped", "not_configured"):
+            _greeting_cache[cache_key] = result
+            logger.info(
+                f"[TTS] Greeting cached: voice={req.voice_name}, "
+                f"expression_status={expression_status}"
+            )
 
         return result
 
