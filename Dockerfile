@@ -9,6 +9,9 @@ RUN pip install --no-cache-dir -r requirements.txt
 # ソースコード (support_base パッケージとして配置)
 COPY support_base/ ./support_base/
 
+# プロンプトファイル (GCS読み込み失敗時のローカルフォールバック)
+COPY prompts/ ./prompts/
+
 ENV PORT=8080
 ENV HOST=0.0.0.0
 

@@ -507,16 +507,19 @@ class SupportAssistant:
         mode_prompts = system_prompts.get(self.mode, SYSTEM_PROMPTS.get('chat', {}))
         self.system_prompt = mode_prompts.get(self.language, mode_prompts.get('ja', ''))
 
-        # ★★★ chatモード: プロンプトが空/エラーの場合はフォールバック ★★★
-        # (PROMPTS_BUCKET_NAME 未設定時やGCS読み込み失敗時のセーフティネット)
+        # ★★★ chatモード: プロンプトが不正/不足の場合はフォールバック ★★★
+        # GCS読み込み失敗時、エラーメッセージ時、またはGCSプロンプトに
+        # JSON応答フォーマット指示が含まれていない場合はフォールバックを使用
         if self.mode == 'chat' and (
             not self.system_prompt
             or self.system_prompt.startswith('エラー:')
+            or '"shops"' not in self.system_prompt
         ):
+            old_prompt = self.system_prompt[:80] if self.system_prompt else "(empty)"
             self.system_prompt = _CHAT_MODE_FALLBACK_PROMPTS.get(
                 self.language, _CHAT_MODE_FALLBACK_PROMPTS['ja']
             )
-            logger.info("[Assistant] chatモード: フォールバックプロンプト使用（即時提案モード）")
+            logger.info(f"[Assistant] chatモード: フォールバックプロンプト使用（即時提案モード）旧プロンプト: {old_prompt}")
 
         # ★★★ 長期記憶のコンテキストをシステムプロンプトに追加（コンシェルジュモードのみ） ★★★
         session_data = session.get_data()
