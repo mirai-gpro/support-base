@@ -64,6 +64,10 @@ from support_base.config.settings import A2E_SERVICE_URL
 
 _a2e_client = None  # A2EClient instance (set by server.py)
 
+# 挨拶TTS+Expressionキャッシュ（起動後の初回呼び出し時に生成、以降再利用）
+# key: (text, voice_name) → value: {"audio": base64, "expression": dict, "expression_status": str}
+_greeting_cache: dict[tuple[str, str], dict] = {}
+
 
 def set_a2e_client(client) -> None:
     """server.py からA2Eクライアントを注入"""
@@ -423,12 +427,22 @@ async def rest_cancel(req: CancelRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+def _is_greeting_text(text: str) -> bool:
+    """挨拶定型文かどうか判定"""
+    for mode_greetings in INITIAL_GREETINGS.values():
+        for greeting in mode_greetings.values():
+            if text.strip() == greeting.strip():
+                return True
+    return False
+
+
 @router.post("/tts/synthesize")
 async def rest_tts_synthesize(req: TTSRequest):
     """
     音声合成 (Google Cloud TTS) + Audio2Expression
 
     gourmet-support の /api/tts/synthesize と互換。
+    挨拶定型文はキャッシュして即時返却（TTS+A2E呼び出しを省略）。
     """
     if not TTS_STT_ENABLED:
         raise HTTPException(status_code=503, detail="TTS service not available")
@@ -437,6 +451,13 @@ async def rest_tts_synthesize(req: TTSRequest):
         text = req.text
         if not text:
             raise HTTPException(status_code=400, detail="text is required")
+
+        # === 挨拶キャッシュ ===
+        cache_key = (text.strip(), req.voice_name)
+        if _is_greeting_text(text) and cache_key in _greeting_cache:
+            cached = _greeting_cache[cache_key]
+            logger.info(f"[TTS] Greeting cache hit: voice={req.voice_name}")
+            return cached
 
         MAX_CHARS = 1000
         if len(text) > MAX_CHARS:
@@ -529,6 +550,14 @@ async def rest_tts_synthesize(req: TTSRequest):
         result = {"success": True, "audio": audio_base64, "expression_status": expression_status}
         if expression_data:
             result["expression"] = expression_data
+
+        # === 挨拶キャッシュに保存（成功時のみ） ===
+        if _is_greeting_text(req.text) and expression_status in ("ok", "skipped", "not_configured"):
+            _greeting_cache[cache_key] = result
+            logger.info(
+                f"[TTS] Greeting cached: voice={req.voice_name}, "
+                f"expression_status={expression_status}"
+            )
 
         return result
 
