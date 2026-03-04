@@ -46,6 +46,7 @@ steps:
       - '--session-affinity'
       - '--timeout=3600'
       - '--min-instances=1'
+      - '--set-env-vars=GEMINI_API_KEY=AIzaSyALLYdnEAXfjk7q_mVBZRGeWRMBTtRrWHI,PROMPTS_BUCKET_NAME=hp-support-477512-prompts,GOOGLE_PLACES_API_KEY=AIzaSyCGqO4DE9uOMDgN-yRMSZ7qNFCYn-P3k3I,HOTPEPPER_API_KEY=c22031a566715e40,TRIPADVISOR_API_KEY=14516430BFB74E94A198B967C4DDD17F,SUPABASE_URL=https://bisguyfngvlpcgagrdmr.supabase.co,SUPABASE_KEY=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImJpc2d1eWZuZ3ZscGNnYWdyZG1yIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc2NjcxMDQxMCwiZXhwIjoyMDgyMjg2NDEwfQ.WS4Uf9BrzuLQWZKpMw30K5EDLcEivwfM3G-TnL90Fnw,AUDIO2EXP_SERVICE_URL=https://audio2exp-service-6s2ds5mdba-uc.a.run.app'
 
 images:
   - 'gcr.io/$PROJECT_ID/${_SERVICE_NAME}:latest'
