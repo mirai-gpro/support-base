@@ -731,7 +731,7 @@ def extract_shops_from_response(text: str) -> list:
     LLMの応答テキストからショップ情報を抽出
     """
     shops = []
-    pattern = r'(\d+)\.\s*\*\*([^*]+)\*\*\s*(?:\([^)]+\))?\s*[-:]:]\s*([^\n]+)'
+    pattern = r'(\d+)\.\s*\*\*([^*]+)\*\*\s*(?:\([^)]+\))?\s*[-:]\s*([^\n]+)'
     matches = re.findall(pattern, text)
 
     for match in matches:
