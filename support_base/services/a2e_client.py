@@ -44,6 +44,8 @@ class A2EClient:
         session_id: str = "unknown",
         audio_format: str = "mp3",
         sample_rate: int | None = None,
+        is_start: bool = True,
+        is_final: bool = True,
     ) -> A2EResult | None:
         """
         音声 → 52次元ARKitブレンドシェイプ
@@ -53,6 +55,8 @@ class A2EClient:
             session_id: セッションID（ログ用）
             audio_format: 音声フォーマット (mp3, wav, pcm)
             sample_rate: サンプルレート (PCMの場合に必要、例: 24000)
+            is_start: 最初のチャンクかどうか（ストリーミング時）
+            is_final: 最後のチャンクかどうか（ストリーミング時）
 
         Returns:
             A2EResult or None (エラー時)
@@ -62,8 +66,8 @@ class A2EClient:
             "audio_base64": audio_base64,
             "session_id": session_id,
             "audio_format": audio_format,
-            "is_start": True,
-            "is_final": True,
+            "is_start": is_start,
+            "is_final": is_final,
         }
         if sample_rate:
             payload["sample_rate"] = sample_rate
