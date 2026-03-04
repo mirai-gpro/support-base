@@ -495,6 +495,46 @@ Always respond in this JSON format:
 }
 
 
+# ========================================
+# chatモード: GCSプロンプトに追加する即時提案指示
+# GCSプロンプトの内容を上書きせず、末尾に追記する
+# ========================================
+_CHAT_MODE_IMMEDIATE_INSTRUCTION = {
+    'ja': """
+
+【グルメモード最優先ルール（上記の指示より優先）】
+このモードでは、ユーザーのお店探しリクエストに対して即座にお店を提案します。
+- ユーザーが「渋谷でイタリアン」等のリクエストをしたら、追加の質問（予算は？人数は？雰囲気は？等）はせず、すぐに5軒提案すること
+- 深掘りヒアリングは行わない。最初のリクエストで即座にお店を返す
+- 必ず以下のJSON形式で応答すること:
+{"message": "紹介テキスト", "shops": [{"name": "店名", "area": "エリア", "description": "特徴", "specialty": "看板メニュー", "price_range": "予算", "atmosphere": "雰囲気"}]}
+- shopsは必ず5軒返すこと
+- JSONの前後に余計なテキストを含めないこと
+""",
+    'en': """
+
+【Gourmet Mode Override (takes priority over above instructions)】
+In this mode, immediately suggest restaurants when the user asks.
+- When user requests restaurants, suggest 5 immediately without follow-up questions
+- Do NOT ask about budget, party size, atmosphere, etc.
+- Always respond in JSON: {"message": "intro text", "shops": [{"name": "", "area": "", "description": "", "specialty": "", "price_range": "", "atmosphere": ""}]}
+- Always return exactly 5 shops
+""",
+    'zh': """
+
+【美食模式最高优先规则】
+用户提出需求时立即推荐5家餐厅，不要追问。
+必须用JSON格式回复：{"message": "推荐文本", "shops": [{"name": "", "area": "", "description": "", "specialty": "", "price_range": "", "atmosphere": ""}]}
+""",
+    'ko': """
+
+【맛집 모드 최우선 규칙】
+사용자 요청 시 즉시 5곳 추천. 추가 질문 금지.
+JSON 형식 필수：{"message": "추천 텍스트", "shops": [{"name": "", "area": "", "description": "", "specialty": "", "price_range": "", "atmosphere": ""}]}
+"""
+}
+
+
 class SupportAssistant:
     """サポートアシスタント - モード対応版"""
 
@@ -507,7 +547,7 @@ class SupportAssistant:
         mode_prompts = system_prompts.get(self.mode, SYSTEM_PROMPTS.get('chat', {}))
         self.system_prompt = mode_prompts.get(self.language, mode_prompts.get('ja', ''))
 
-        # ★★★ chatモード: プロンプトが空/エラーメッセージの場合はフォールバック ★★★
+        # ★★★ chatモード: プロンプトが空/エラーの場合はフォールバック ★★★
         if self.mode == 'chat' and (
             not self.system_prompt
             or self.system_prompt.startswith('エラー:')
@@ -516,6 +556,12 @@ class SupportAssistant:
                 self.language, _CHAT_MODE_FALLBACK_PROMPTS['ja']
             )
             logger.info("[Assistant] chatモード: フォールバックプロンプト使用（即時提案モード）")
+        elif self.mode == 'chat' and self.system_prompt:
+            # ★★★ GCSプロンプトがある場合でも、即時提案の指示を追加 ★★★
+            self.system_prompt += _CHAT_MODE_IMMEDIATE_INSTRUCTION.get(
+                self.language, _CHAT_MODE_IMMEDIATE_INSTRUCTION['ja']
+            )
+            logger.info("[Assistant] chatモード: GCSプロンプトに即時提案指示を追加")
 
         # ★★★ 長期記憶のコンテキストをシステムプロンプトに追加（コンシェルジュモードのみ） ★★★
         session_data = session.get_data()
