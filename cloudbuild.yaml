@@ -12,7 +12,7 @@
 
 substitutions:
   _SERVICE_NAME: support-base
-  _REGION: asia-northeast1
+  _REGION: us-central1
   _MEMORY: 1Gi
 
 steps:
@@ -50,6 +50,9 @@ steps:
       - '--memory=${_MEMORY}'
       - '--port=8080'
       - '--allow-unauthenticated'
+      - '--session-affinity'
+      - '--timeout=3600'
+      - '--min-instances=1'
 
 images:
   - 'gcr.io/$PROJECT_ID/${_SERVICE_NAME}:$COMMIT_SHA'

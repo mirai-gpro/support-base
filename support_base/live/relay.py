@@ -261,7 +261,15 @@ class LiveRelay:
 
                 sc = response.server_content
                 if not sc:
-                    # tool_call 等の処理 (将来拡張)
+                    # TODO: tool_call ハンドリング未実装
+                    # Gemini がレストラン検索等の Function Calling を返す場合、
+                    # ここで response.tool_call を処理し、結果を Gemini に返す必要がある。
+                    # 現状: Live API でお店検索は動作しない（REST /api/v2/rest/chat のみ対応）
+                    if hasattr(response, 'tool_call') and response.tool_call:
+                        logger.warning(
+                            f"[LiveRelay] Tool call received but not implemented: "
+                            f"{response.tool_call}"
+                        )
                     continue
 
                 # --- 割り込み検知 (stt_stream.py L650-662) ---
