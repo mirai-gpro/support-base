@@ -396,12 +396,23 @@ class LiveRelay:
         """
         try:
             audio_b64 = base64.b64encode(audio_pcm).decode()
+            pcm_duration_ms = len(audio_pcm) // (24000 * 2) * 1000  # 24kHz 16bit mono
+            logger.info(
+                f"[LiveRelay] A2E request: "
+                f"{len(audio_pcm)} bytes (~{pcm_duration_ms}ms), "
+                f"session={self.session.session_id}"
+            )
             result = await self.a2e_client.process_audio(
                 audio_base64=audio_b64,
                 session_id=self.session.session_id,
                 audio_format="pcm",
+                sample_rate=24000,
             )
             if result and result.frames:
+                # 非ゼロフレーム検出（デバッグ用）
+                non_zero = sum(
+                    1 for f in result.frames if any(v > 0.001 for v in f)
+                )
                 await self._send_json(client_ws, {
                     "type": "expression",
                     "data": {
@@ -411,7 +422,14 @@ class LiveRelay:
                     },
                 })
                 logger.info(
-                    f"[LiveRelay] Expression sent: {len(result.frames)} frames"
+                    f"[LiveRelay] Expression sent: "
+                    f"{len(result.frames)} frames "
+                    f"({non_zero} non-zero)"
+                )
+            else:
+                logger.warning(
+                    f"[LiveRelay] A2E returned no frames: "
+                    f"session={self.session.session_id}"
                 )
         except Exception as e:
             logger.warning(f"[LiveRelay] A2E failed (non-fatal): {e}")

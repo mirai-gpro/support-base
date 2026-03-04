@@ -43,6 +43,7 @@ class A2EClient:
         audio_base64: str,
         session_id: str = "unknown",
         audio_format: str = "mp3",
+        sample_rate: int | None = None,
     ) -> A2EResult | None:
         """
         音声 → 52次元ARKitブレンドシェイプ
@@ -51,6 +52,7 @@ class A2EClient:
             audio_base64: base64エンコードされた音声データ
             session_id: セッションID（ログ用）
             audio_format: 音声フォーマット (mp3, wav, pcm)
+            sample_rate: サンプルレート (PCMの場合に必要、例: 24000)
 
         Returns:
             A2EResult or None (エラー時)
@@ -60,9 +62,20 @@ class A2EClient:
             "audio_base64": audio_base64,
             "session_id": session_id,
             "audio_format": audio_format,
+            "is_start": True,
+            "is_final": True,
         }
+        if sample_rate:
+            payload["sample_rate"] = sample_rate
 
         try:
+            audio_size_kb = len(audio_base64) * 3 // 4 // 1024
+            logger.info(
+                f"[A2E] Request: format={audio_format}, "
+                f"size={audio_size_kb}KB, "
+                f"sample_rate={sample_rate}, "
+                f"session={session_id}"
+            )
             response = await self._client.post(url, json=payload)
             response.raise_for_status()
             data = response.json()
@@ -74,14 +87,23 @@ class A2EClient:
             )
 
             frame_count = len(result.frames)
+            # 非ゼロフレーム数を確認（デバッグ用）
+            non_zero = sum(
+                1 for f in result.frames if any(v > 0.001 for v in f)
+            )
             logger.info(
-                f"[A2E] OK: {frame_count} frames, "
+                f"[A2E] OK: {frame_count} frames "
+                f"({non_zero} non-zero), "
                 f"session={session_id}"
             )
             return result
 
         except httpx.TimeoutException:
-            logger.warning(f"[A2E] Timeout: session={session_id}")
+            logger.warning(
+                f"[A2E] Timeout ({A2E_TIMEOUT_SECONDS}s): "
+                f"format={audio_format}, size={audio_size_kb}KB, "
+                f"session={session_id}"
+            )
             return None
         except Exception as e:
             logger.error(f"[A2E] Error: {e}, session={session_id}")
