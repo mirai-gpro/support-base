@@ -69,7 +69,7 @@ AUDIO2EXP_SERVICE_URL = os.getenv("AUDIO2EXP_SERVICE_URL", "")
 class RestSessionStartRequest(BaseModel):
     user_info: dict = {}
     language: str = "ja"
-    mode: str = "chat"  # "chat" or "concierge"
+    mode: str = "gourmet"  # "gourmet"(旧"chat") or "concierge"
 
 
 class RestSessionStartResponse(BaseModel):
@@ -83,7 +83,7 @@ class ChatRequest(BaseModel):
     message: str
     stage: str = "conversation"
     language: str = "ja"
-    mode: str = "chat"
+    mode: str = "gourmet"
 
 
 class FinalizeRequest(BaseModel):
@@ -111,6 +111,13 @@ class STTRequest(BaseModel):
 # === ルーター ===
 
 router = APIRouter(prefix="/api/v2/rest", tags=["REST API"])
+
+
+def _normalize_mode(mode: str) -> str:
+    """Live API mode → REST mode に正規化 ('gourmet' → 'chat')"""
+    if mode == "gourmet":
+        return "chat"
+    return mode
 
 
 # === ヘルパー ===
@@ -153,9 +160,10 @@ async def rest_start_session(req: RestSessionStartRequest):
     SupportSession + SupportAssistant を使ってセッションを初期化する。
     """
     try:
-        # 1. セッション初期化
+        # 1. セッション初期化（mode正規化: gourmet→chat）
+        rest_mode = _normalize_mode(req.mode)
         session = SupportSession()
-        session.initialize(req.user_info, language=req.language, mode=req.mode)
+        session.initialize(req.user_info, language=req.language, mode=rest_mode)
 
         # 2. アシスタント作成
         assistant = SupportAssistant(session, SYSTEM_PROMPTS)
@@ -206,11 +214,20 @@ async def rest_chat(req: ChatRequest):
         session_data = session.get_data()
 
         if not session_data:
-            raise HTTPException(status_code=404, detail="Session not found")
+            # Live API セッションからの REST チャット要求: 自動初期化
+            # (Live API は SessionManager、REST は SupportSession で別管理のため)
+            rest_mode = _normalize_mode(req.mode)
+            logger.info(
+                f"[REST] Auto-creating SupportSession for Live API session: "
+                f"{req.session_id}, mode={rest_mode}"
+            )
+            session.initialize({}, language=req.language, mode=rest_mode)
+            session_data = session.get_data()
 
-        # 1. 状態確定
+        # 1. 状態確定（mode正規化: gourmet→chat）
+        rest_mode = _normalize_mode(req.mode)
         session.update_language(req.language)
-        session.update_mode(req.mode)
+        session.update_mode(rest_mode)
 
         # 2. ユーザー入力を記録
         session.add_message("user", req.message, "chat")

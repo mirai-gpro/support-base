@@ -117,6 +117,10 @@ class SessionStartResponse(BaseModel):
     ws_url: str
 
 
+class SessionEndRequest(BaseModel):
+    session_id: str
+
+
 class SessionEndResponse(BaseModel):
     session_id: str
     ended: bool
@@ -173,12 +177,12 @@ async def start_session(req: SessionStartRequest):
 
 
 @app.post("/api/v2/session/end", response_model=SessionEndResponse)
-async def end_session(session_id: str):
+async def end_session(req: SessionEndRequest):
     """セッション終了"""
-    ended = session_manager.end_session(session_id)
+    ended = session_manager.end_session(req.session_id)
     if not ended:
-        raise HTTPException(status_code=404, detail=f"Session not found: {session_id}")
-    return SessionEndResponse(session_id=session_id, ended=True)
+        raise HTTPException(status_code=404, detail=f"Session not found: {req.session_id}")
+    return SessionEndResponse(session_id=req.session_id, ended=True)
 
 
 @app.get("/api/v2/modes")
