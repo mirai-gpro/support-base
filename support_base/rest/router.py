@@ -16,8 +16,6 @@ dialogue_type="rest" のセッション向け。
   GET  /api/v2/rest/session/{id}     - セッション取得
 """
 
-import os
-import time
 import base64
 import logging
 from datetime import datetime
@@ -61,7 +59,20 @@ except Exception as e:
     TTS_STT_ENABLED = False
 
 # --- Audio2Expression ---
-AUDIO2EXP_SERVICE_URL = os.getenv("AUDIO2EXP_SERVICE_URL", "")
+# server.py から共有される A2E クライアント (set_a2e_client() で注入)
+from support_base.config.settings import A2E_SERVICE_URL
+
+_a2e_client = None  # A2EClient instance (set by server.py)
+
+
+def set_a2e_client(client) -> None:
+    """server.py からA2Eクライアントを注入"""
+    global _a2e_client
+    _a2e_client = client
+    if client:
+        logger.info(f"[REST] A2E client injected (URL: {A2E_SERVICE_URL})")
+    else:
+        logger.info("[REST] A2E client not available")
 
 
 # === Pydantic モデル ===
@@ -122,13 +133,40 @@ def _normalize_mode(mode: str) -> str:
 
 # === ヘルパー ===
 
-def _get_expression_frames(audio_base64: str, session_id: str, audio_format: str = "mp3"):
-    """Audio2Expression サービスから表情フレームを取得"""
-    if not AUDIO2EXP_SERVICE_URL or not session_id:
+async def _get_expression_frames(audio_base64: str, session_id: str, audio_format: str = "mp3"):
+    """
+    Audio2Expression サービスから表情フレームを取得
+
+    共有A2Eクライアント（async httpx）を優先使用。
+    フォールバックとしてA2E_SERVICE_URLへの直接リクエストも対応。
+    """
+    # 1. 共有クライアント (async) があれば使う
+    if _a2e_client:
+        try:
+            result = await _a2e_client.process_audio(
+                audio_base64=audio_base64,
+                session_id=session_id,
+                audio_format=audio_format,
+            )
+            if result and result.frames:
+                return {
+                    "names": result.names,
+                    "frames": result.frames,
+                    "frame_rate": result.frame_rate,
+                }
+            logger.warning(f"[Audio2Exp] A2E returned no frames: session={session_id}")
+            return None
+        except Exception as e:
+            logger.warning(f"[Audio2Exp] A2E client error: {e}")
+            return None
+
+    # 2. フォールバック: A2E_SERVICE_URL への直接リクエスト (同期)
+    if not A2E_SERVICE_URL or not session_id:
+        logger.info("[Audio2Exp] Not configured (A2E_SERVICE_URL not set)")
         return None
     try:
         resp = http_requests.post(
-            f"{AUDIO2EXP_SERVICE_URL}/api/audio2expression",
+            f"{A2E_SERVICE_URL}/api/audio2expression",
             json={
                 "audio_base64": audio_base64,
                 "session_id": session_id,
@@ -142,7 +180,7 @@ def _get_expression_frames(audio_base64: str, session_id: str, audio_format: str
             result = resp.json()
             logger.info(f"[Audio2Exp] OK: {len(result.get('frames', []))} frames")
             return result
-        logger.warning(f"[Audio2Exp] Failed: status={resp.status_code}")
+        logger.warning(f"[Audio2Exp] Failed: status={resp.status_code}, body={resp.text[:200]}")
         return None
     except Exception as e:
         logger.warning(f"[Audio2Exp] Error: {e}")
@@ -427,17 +465,27 @@ async def rest_tts_synthesize(req: TTSRequest):
 
         audio_base64 = base64.b64encode(response.audio_content).decode("utf-8")
 
-        # Audio2Expression (同期)
+        # Audio2Expression
         expression_data = None
-        if AUDIO2EXP_SERVICE_URL and req.session_id:
+        expression_status = "skipped"  # skipped / ok / error / not_configured
+
+        if not req.session_id:
+            expression_status = "skipped"
+            logger.info("[Audio2Exp] Skipped: no session_id")
+        elif not _a2e_client and not A2E_SERVICE_URL:
+            expression_status = "not_configured"
+            logger.info("[Audio2Exp] Not configured: A2E_SERVICE_URL not set")
+        else:
             try:
-                expression_data = _get_expression_frames(
+                expression_data = await _get_expression_frames(
                     audio_base64, req.session_id, "mp3"
                 )
+                expression_status = "ok" if expression_data else "error"
             except Exception as e:
+                expression_status = "error"
                 logger.warning(f"[Audio2Exp] Error: {e}")
 
-        result = {"success": True, "audio": audio_base64}
+        result = {"success": True, "audio": audio_base64, "expression_status": expression_status}
         if expression_data:
             result["expression"] = expression_data
 
