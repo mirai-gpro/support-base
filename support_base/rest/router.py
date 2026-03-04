@@ -477,13 +477,30 @@ async def rest_tts_synthesize(req: TTSRequest):
             logger.info("[Audio2Exp] Not configured: A2E_SERVICE_URL not set")
         else:
             try:
+                logger.info(
+                    f"[Audio2Exp] Calling A2E: "
+                    f"client={'shared' if _a2e_client else 'fallback'}, "
+                    f"audio_size={len(audio_base64) * 3 // 4 // 1024}KB, "
+                    f"session={req.session_id}"
+                )
                 expression_data = await _get_expression_frames(
                     audio_base64, req.session_id, "mp3"
                 )
                 expression_status = "ok" if expression_data else "error"
+                if expression_data:
+                    frame_count = len(expression_data.get("frames", []))
+                    logger.info(
+                        f"[Audio2Exp] Success: {frame_count} frames, "
+                        f"session={req.session_id}"
+                    )
+                else:
+                    logger.warning(
+                        f"[Audio2Exp] No expression data returned: "
+                        f"session={req.session_id}"
+                    )
             except Exception as e:
                 expression_status = "error"
-                logger.warning(f"[Audio2Exp] Error: {e}")
+                logger.warning(f"[Audio2Exp] Error: {e}", exc_info=True)
 
         result = {"success": True, "audio": audio_base64, "expression_status": expression_status}
         if expression_data:
