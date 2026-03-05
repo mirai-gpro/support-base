@@ -12,6 +12,8 @@ Live API / REST 両方の経路で使用。
 
 import logging
 
+from google.genai import types
+
 from support_base.modes.base_mode import BaseModePlugin
 
 logger = logging.getLogger(__name__)
@@ -162,6 +164,36 @@ class GourmetModePlugin(BaseModePlugin):
             "zh": "欢迎！今天想找什么样的餐厅呢？",
         }
         return greetings.get(language, greetings["ja"])
+
+    def get_live_api_tools(self) -> list:
+        """
+        Live API 用 Function Calling ツール定義
+
+        search_restaurants ツール:
+          Gemini がユーザーのリクエストを受けて呼び出す。
+          バックエンドで REST API ロジック（SupportAssistant + enrich_shops_with_photos）を実行し、
+          ショップカードをクライアントに送信する。
+        """
+        search_restaurants = types.FunctionDeclaration(
+            name="search_restaurants",
+            description=(
+                "ユーザーのリクエストに基づいてレストランを検索し、ショップカードを表示する。"
+                "ユーザーが食事・レストラン・グルメに関するリクエストをしたら、"
+                "追加の質問をせず即座にこのツールを呼び出すこと。"
+                "呼び出す前に短い受けのセリフ（1文）を音声で返してからツールを呼ぶ。"
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "ユーザーのリクエスト内容（例: '渋谷でイタリアン', '新宿で焼肉'）",
+                    },
+                },
+                "required": ["query"],
+            },
+        )
+        return [types.Tool(function_declarations=[search_restaurants])]
 
     def get_memory_schema(self) -> dict:
         """グルメモード固有の長期記憶スキーマ"""

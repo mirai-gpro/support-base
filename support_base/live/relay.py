@@ -22,6 +22,8 @@ stt_stream.py の GeminiLiveApp を Web 向けに再構成。
     { "type": "audio",         "data": "<base64 PCM 24kHz>" }
     { "type": "transcription", "role": "user"|"ai", "text": "..." }
     { "type": "expression",    "data": { names, frames, frame_rate } }
+    { "type": "shop_cards",    "shops": [...], "response": "..." }
+    { "type": "rest_audio",    "data": "<base64 MP3>", "text": "..." }
     { "type": "interrupted" }
     { "type": "reconnecting",  "reason": "..." }
     { "type": "reconnected",   "session_count": N }
@@ -312,14 +314,10 @@ class LiveRelay:
 
                 sc = response.server_content
                 if not sc:
-                    # TODO: tool_call ハンドリング未実装
-                    # Gemini がレストラン検索等の Function Calling を返す場合、
-                    # ここで response.tool_call を処理し、結果を Gemini に返す必要がある。
-                    # 現状: Live API でお店検索は動作しない（REST /api/v2/rest/chat のみ対応）
+                    # --- Function Calling ハンドリング ---
                     if hasattr(response, 'tool_call') and response.tool_call:
-                        logger.warning(
-                            f"[LiveRelay] Tool call received but not implemented: "
-                            f"{response.tool_call}"
+                        await self._handle_tool_call(
+                            response.tool_call, gemini_session, client_ws
                         )
                     continue
 
@@ -557,6 +555,297 @@ class LiveRelay:
                 )
         except Exception as e:
             logger.warning(f"[LiveRelay] A2E chunk error (non-fatal): {e}")
+
+    async def _handle_tool_call(
+        self, tool_call, gemini_session, client_ws: WebSocket
+    ) -> None:
+        """
+        Gemini からの Function Call を処理
+
+        search_restaurants の場合:
+        1. REST API ロジックでレストラン検索 + enrich
+        2. ショップカードを WebSocket でクライアントに送信
+        3. 1軒目の解説を TTS で音声化してクライアントに送信（隙間埋め）
+        4. tool_response を Gemini に返して会話を継続
+        """
+        function_responses = []
+
+        for fc in tool_call.function_calls:
+            logger.info(
+                f"[LiveRelay] Tool call: name={fc.name}, "
+                f"args={fc.args}, session={self.session.session_id}"
+            )
+
+            if fc.name == "search_restaurants":
+                result = await self._execute_restaurant_search(
+                    fc.args, client_ws
+                )
+                function_responses.append(
+                    types.FunctionResponse(
+                        id=fc.id,
+                        name=fc.name,
+                        response=result,
+                    )
+                )
+            else:
+                logger.warning(f"[LiveRelay] Unknown tool: {fc.name}")
+                function_responses.append(
+                    types.FunctionResponse(
+                        id=fc.id,
+                        name=fc.name,
+                        response={"error": f"Unknown tool: {fc.name}"},
+                    )
+                )
+
+        # tool_response を Gemini に返す → Gemini が続きの音声を生成
+        if function_responses:
+            await gemini_session.send_tool_response(
+                function_responses=function_responses
+            )
+            logger.info(
+                f"[LiveRelay] Tool response sent: "
+                f"{len(function_responses)} responses"
+            )
+
+    async def _execute_restaurant_search(
+        self, args: dict, client_ws: WebSocket
+    ) -> dict:
+        """
+        search_restaurants ツールの実行
+
+        REST API ロジック (SupportAssistant + enrich_shops_with_photos) を呼び出し、
+        ショップカードを WebSocket で送信。1軒目の解説を TTS で読み上げ。
+        """
+        from support_base.core.support_core import (
+            SYSTEM_PROMPTS,
+            SupportSession,
+            SupportAssistant,
+        )
+        from support_base.core.api_integrations import (
+            enrich_shops_with_photos,
+            extract_area_from_text,
+        )
+
+        query = args.get("query", "")
+        language = self.session.language or "ja"
+        session_id = self.session.session_id
+
+        logger.info(
+            f"[LiveRelay] Restaurant search: query={query!r}, "
+            f"lang={language}, session={session_id}"
+        )
+
+        try:
+            # REST 用の SupportSession を作成/取得
+            rest_session = SupportSession(session_id)
+            rest_data = rest_session.get_data()
+            if not rest_data:
+                rest_session.initialize({}, language=language, mode="chat")
+
+            rest_session.update_language(language)
+            rest_session.update_mode("chat")
+            rest_session.add_message("user", query, "chat")
+
+            # Gemini REST で推論
+            assistant = SupportAssistant(rest_session, SYSTEM_PROMPTS)
+            result = assistant.process_user_message(query, "conversation")
+
+            shops = result.get("shops") or []
+            response_text = result.get("response", "")
+
+            # enrich with Google Places / HotPepper / TripAdvisor
+            if shops:
+                area = extract_area_from_text(query, language)
+                shops = enrich_shops_with_photos(shops, area, language) or []
+
+            # ショップカードをクライアントに送信
+            if shops:
+                # REST 応答テキストも含めて送信
+                shop_messages = {
+                    "ja": lambda c: f"ご希望に合うお店を{c}件ご紹介します。\n\n",
+                    "en": lambda c: f"Here are {c} restaurant recommendations.\n\n",
+                    "zh": lambda c: f"为您推荐{c}家餐厅。\n\n",
+                    "ko": lambda c: f"고객님께 {c}개의 식당을 추천합니다.\n\n",
+                }
+                intro = shop_messages.get(language, shop_messages["ja"])
+
+                shop_list = []
+                for i, shop in enumerate(shops, 1):
+                    name = shop.get("name", "")
+                    shop_area = shop.get("area", "")
+                    description = shop.get("description", "")
+                    if shop_area:
+                        shop_list.append(
+                            f"{i}. **{name}**({shop_area}): {description}"
+                        )
+                    else:
+                        shop_list.append(f"{i}. **{name}**: {description}")
+
+                display_text = intro(len(shops)) + "\n\n".join(shop_list)
+
+                await self._send_json(client_ws, {
+                    "type": "shop_cards",
+                    "shops": shops,
+                    "response": display_text,
+                })
+                logger.info(
+                    f"[LiveRelay] Shop cards sent: {len(shops)} shops, "
+                    f"session={session_id}"
+                )
+
+                # 1軒目の解説を TTS で読み上げ（隙間埋め）
+                await self._tts_first_shop(shops[0], language, client_ws)
+            else:
+                await self._send_json(client_ws, {
+                    "type": "shop_cards",
+                    "shops": [],
+                    "response": response_text,
+                })
+
+            # Gemini に返す tool_result（短い要約）
+            shop_names = [s.get("name", "") for s in shops[:5]]
+            return {
+                "status": "success",
+                "shop_count": len(shops),
+                "shop_names": shop_names,
+                "message": (
+                    f"{len(shops)}件のお店を見つけてショップカードを表示しました。"
+                    "1軒目の解説は音声で読み上げ済みです。"
+                    "ユーザーにはカードが見えています。"
+                    "この後は短く「気になるお店はありますか？」等と聞いてください。"
+                    if shops
+                    else "条件に合うお店が見つかりませんでした。別の条件を提案してください。"
+                ),
+            }
+
+        except Exception as e:
+            logger.error(
+                f"[LiveRelay] Restaurant search error: {e}",
+                exc_info=True,
+            )
+            await self._send_json(client_ws, {
+                "type": "shop_cards",
+                "shops": [],
+                "response": "お店の検索中にエラーが発生しました。",
+            })
+            return {
+                "status": "error",
+                "message": f"検索エラー: {type(e).__name__}: {str(e)[:200]}",
+            }
+
+    async def _tts_first_shop(
+        self, shop: dict, language: str, client_ws: WebSocket
+    ) -> None:
+        """
+        1軒目のお店の解説を TTS で音声化してクライアントに送信（隙間埋め）
+
+        Live API の音声とは別に REST API の TTS を使用。
+        フロントエンドは rest_audio タイプで受信し、Live 音声の後に再生する。
+        """
+        try:
+            from google.cloud import texttospeech
+        except ImportError:
+            logger.warning("[LiveRelay] TTS not available for first shop readout")
+            return
+
+        name = shop.get("name", "")
+        area = shop.get("area", "")
+        description = shop.get("description", "")
+        specialty = shop.get("specialty", "")
+        rating = shop.get("rating")
+
+        # 読み上げテキストを構築
+        tts_parts = {
+            "ja": self._build_shop_narration_ja,
+            "en": self._build_shop_narration_en,
+        }
+        builder = tts_parts.get(language, self._build_shop_narration_ja)
+        narration = builder(name, area, description, specialty, rating)
+
+        if not narration:
+            return
+
+        try:
+            tts_client = texttospeech.TextToSpeechClient()
+            voice_map = {
+                "ja": ("ja-JP", "ja-JP-Chirp3-HD-Leda"),
+                "en": ("en-US", "en-US-Chirp3-HD-Leda"),
+                "zh": ("cmn-CN", "cmn-CN-Chirp3-HD-Leda"),
+                "ko": ("ko-KR", "ko-KR-Chirp3-HD-Leda"),
+            }
+            lang_code, voice_name = voice_map.get(
+                language, voice_map["ja"]
+            )
+
+            synthesis_input = texttospeech.SynthesisInput(text=narration)
+            voice = texttospeech.VoiceSelectionParams(
+                language_code=lang_code, name=voice_name
+            )
+            audio_config = texttospeech.AudioConfig(
+                audio_encoding=texttospeech.AudioEncoding.MP3,
+                speaking_rate=1.0,
+            )
+
+            response = tts_client.synthesize_speech(
+                input=synthesis_input, voice=voice, audio_config=audio_config
+            )
+
+            import base64 as b64
+            audio_base64 = b64.b64encode(response.audio_content).decode()
+
+            await self._send_json(client_ws, {
+                "type": "rest_audio",
+                "data": audio_base64,
+                "text": narration,
+            })
+            logger.info(
+                f"[LiveRelay] First shop TTS sent: {name}, "
+                f"audio_size={len(audio_base64) // 1024}KB"
+            )
+
+        except Exception as e:
+            logger.warning(f"[LiveRelay] First shop TTS error: {e}")
+
+    @staticmethod
+    def _build_shop_narration_ja(
+        name: str, area: str, description: str,
+        specialty: str, rating: float | None,
+    ) -> str:
+        """1軒目の日本語ナレーション構築"""
+        parts = []
+        if name:
+            parts.append(f"まず1軒目、{name}です。")
+        if area:
+            parts.append(f"{area}にあります。")
+        if description:
+            # 長すぎる場合は切り詰め
+            desc = description[:150] if len(description) > 150 else description
+            parts.append(desc)
+        if specialty:
+            parts.append(f"看板メニューは{specialty}です。")
+        if rating and rating >= 4.0:
+            parts.append(f"評価は{rating}と高評価です。")
+        return "".join(parts)
+
+    @staticmethod
+    def _build_shop_narration_en(
+        name: str, area: str, description: str,
+        specialty: str, rating: float | None,
+    ) -> str:
+        """1軒目の英語ナレーション構築"""
+        parts = []
+        if name:
+            parts.append(f"First up, {name}.")
+        if area:
+            parts.append(f"Located in {area}.")
+        if description:
+            desc = description[:150] if len(description) > 150 else description
+            parts.append(desc)
+        if specialty:
+            parts.append(f"Their specialty is {specialty}.")
+        if rating and rating >= 4.0:
+            parts.append(f"Rated {rating} stars.")
+        return " ".join(parts)
 
     def _build_live_config(self, context: str | None = None) -> dict:
         """
