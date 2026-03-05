@@ -172,10 +172,17 @@ async def _get_expression_frames(
                     "frames": result.frames,
                     "frame_rate": result.frame_rate,
                 }
-            logger.warning(f"[Audio2Exp] A2E returned no frames: session={session_id}")
+            logger.warning(
+                f"[Audio2Exp] A2E returned no frames: session={session_id}, "
+                f"result_type={type(result).__name__}, "
+                f"has_frames={hasattr(result, 'frames') if result else 'N/A'}"
+            )
             return None
         except Exception as e:
-            logger.warning(f"[Audio2Exp] A2E client error: {e}")
+            logger.error(
+                f"[Audio2Exp] A2E client error: {e}, session={session_id}",
+                exc_info=True,
+            )
             return None
 
     # 2. フォールバック: A2E_SERVICE_URL への直接リクエスト (同期)
@@ -198,10 +205,13 @@ async def _get_expression_frames(
             result = resp.json()
             logger.info(f"[Audio2Exp] OK: {len(result.get('frames', []))} frames")
             return result
-        logger.warning(f"[Audio2Exp] Failed: status={resp.status_code}, body={resp.text[:200]}")
+        logger.error(
+            f"[Audio2Exp] Failed: status={resp.status_code}, "
+            f"body={resp.text[:300]}, session={session_id}"
+        )
         return None
     except Exception as e:
-        logger.warning(f"[Audio2Exp] Error: {e}")
+        logger.error(f"[Audio2Exp] Error: {e}, session={session_id}", exc_info=True)
         return None
 
 

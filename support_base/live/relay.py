@@ -372,27 +372,30 @@ class LiveRelay:
                                     "type": "audio",
                                     "data": base64.b64encode(audio_data).decode(),
                                 })
-                                # A2E用にバッファに蓄積（ストリーミング）
+                                # A2E用にバッファに蓄積
+                                # 方針: 初回0.25秒で即送信 + 残りはturn_completeまで一括
+                                # (チャンク分割を最小化し、REST同等の精度を実現)
                                 self.state.a2e_chunk_buffer.extend(audio_data)
                                 self.state.a2e_total_bytes += len(audio_data)
 
-                                # 段階的チャンクサイズ（フロントエンド逆提案を採用）
-                                # chunk#1: 0.25秒（初動を最速に）
-                                # chunk#2: 2.0秒（冒頭品質向上）
-                                # chunk#3〜: 5.0秒（503対策）
-                                A2E_FIRST_CHUNK = 24000 * 2 // 4       # 12,000 bytes = 0.25s
-                                A2E_SECOND_CHUNK = 24000 * 2 * 2       # 96,000 bytes = 2.0s
-                                A2E_NORMAL_CHUNK = 24000 * 2 * 5       # 240,000 bytes = 5.0s
+                                A2E_FIRST_CHUNK = 24000 * 2 // 4   # 12,000 bytes = 0.25s
+                                A2E_MAX_BUFFER = 24000 * 2 * 10    # 480,000 bytes = 10s (安全弁)
 
-                                idx = self.state.a2e_chunk_index
-                                if idx == 0:
-                                    threshold = A2E_FIRST_CHUNK
-                                elif idx == 1:
-                                    threshold = A2E_SECOND_CHUNK
-                                else:
-                                    threshold = A2E_NORMAL_CHUNK
-
-                                if len(self.state.a2e_chunk_buffer) >= threshold:
+                                if self.state.a2e_chunk_index == 0:
+                                    # 初回: 0.25秒で即座にリップシンク開始
+                                    if len(self.state.a2e_chunk_buffer) >= A2E_FIRST_CHUNK:
+                                        chunk = bytes(self.state.a2e_chunk_buffer)
+                                        self.state.a2e_chunk_buffer = bytearray()
+                                        self.state.a2e_chunk_index += 1
+                                        asyncio.create_task(
+                                            self._send_expression_chunk(
+                                                client_ws, chunk,
+                                                is_first=True,
+                                                chunk_index=0,
+                                            )
+                                        )
+                                elif len(self.state.a2e_chunk_buffer) >= A2E_MAX_BUFFER:
+                                    # 安全弁: 10秒超の場合のみ分割（通常は到達しない）
                                     chunk = bytes(self.state.a2e_chunk_buffer)
                                     self.state.a2e_chunk_buffer = bytearray()
                                     chunk_index = self.state.a2e_chunk_index
@@ -400,10 +403,10 @@ class LiveRelay:
                                     asyncio.create_task(
                                         self._send_expression_chunk(
                                             client_ws, chunk,
-                                            is_first=(chunk_index == 0),
                                             chunk_index=chunk_index,
                                         )
                                     )
+                                # else: バッファに溜め続ける（turn_completeで一括処理）
 
                 # --- ターン完了 (stt_stream.py L600-645) ---
                 if hasattr(sc, "turn_complete") and sc.turn_complete:
@@ -487,7 +490,7 @@ class LiveRelay:
         """
         音声チャンクから expression を生成してクライアントへ送信（ストリーミング対応）
 
-        段階的チャンクサイズ (0.25s → 2.0s → 5.0s) で audio2exp に送信し、
+        初回0.25sチャンク + 残りturn_complete一括で audio2exp に送信し、
         結果を即座にクライアントへ転送する。
         フロントエンドの queueLiveExpressionFrames() がバッファに追加して再生する。
         """
@@ -541,11 +544,17 @@ class LiveRelay:
                         "is_final": is_final,
                     },
                 })
+                # 入力長 vs 出力フレーム数の比較ログ（同期ズレ診断用）
+                input_duration_s = len(audio_chunk) / (24000 * 2)
+                output_duration_s = len(result.frames) / result.frame_rate
+                diff_s = output_duration_s - input_duration_s
                 logger.info(
-                    f"[LiveRelay] Expression chunk sent: "
-                    f"{len(result.frames)} frames "
-                    f"({non_zero} non-zero), "
-                    f"chunk_index={chunk_index}, is_final={is_final}"
+                    f"[LiveRelay] A2E sync: chunk#{chunk_index}: "
+                    f"input={input_duration_s:.3f}s, "
+                    f"output={len(result.frames)} frames "
+                    f"({output_duration_s:.3f}s), "
+                    f"diff={diff_s:+.3f}s, "
+                    f"non_zero={non_zero}, is_final={is_final}"
                 )
             else:
                 logger.warning(
