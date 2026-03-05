@@ -9,6 +9,10 @@
 # 手動実行:
 #   # ルートから実行
 #   gcloud builds submit --config=cloudbuild.yaml .
+#
+# 前提: Secret Manager に以下のシークレットを登録済みであること
+#   gemini-api-key, google-places-api-key, hotpepper-api-key,
+#   tripadvisor-api-key, supabase-key
 
 substitutions:
   _SERVICE_NAME: support-base
@@ -46,7 +50,8 @@ steps:
       - '--session-affinity'
       - '--timeout=3600'
       - '--min-instances=1'
-      - '--set-env-vars=GEMINI_API_KEY=AIzaSyDlM49p_GUZnz4SyXCeLxPN-2WxzdUIvuo,PROMPTS_BUCKET_NAME=ai-meet-486502-prompts,GOOGLE_PLACES_API_KEY=AIzaSyCGqO4DE9uOMDgN-yRMSZ7qNFCYn-P3k3I,HOTPEPPER_API_KEY=c22031a566715e40,TRIPADVISOR_API_KEY=14516430BFB74E94A198B967C4DDD17F,SUPABASE_URL=https://bisguyfngvlpcgagrdmr.supabase.co,SUPABASE_KEY=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImJpc2d1eWZuZ3ZscGNnYWdyZG1yIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc2NjcxMDQxMCwiZXhwIjoyMDgyMjg2NDEwfQ.WS4Uf9BrzuLQWZKpMw30K5EDLcEivwfM3G-TnL90Fnw,AUDIO2EXP_SERVICE_URL=https://audio2exp-service-6s2ds5mdba-uc.a.run.app'
+      - '--set-env-vars=PROMPTS_BUCKET_NAME=ai-meet-486502-prompts,SUPABASE_URL=https://bisguyfngvlpcgagrdmr.supabase.co,AUDIO2EXP_SERVICE_URL=https://audio2exp-service-6s2ds5mdba-uc.a.run.app'
+      - '--set-secrets=GEMINI_API_KEY=gemini-api-key:latest,GOOGLE_PLACES_API_KEY=google-places-api-key:latest,HOTPEPPER_API_KEY=hotpepper-api-key:latest,TRIPADVISOR_API_KEY=tripadvisor-api-key:latest,SUPABASE_KEY=supabase-key:latest'
 
 images:
   - 'gcr.io/$PROJECT_ID/${_SERVICE_NAME}:latest'
