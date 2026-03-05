@@ -388,8 +388,17 @@ async def rest_chat(req: ChatRequest):
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"[REST] Chat error: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
+        import traceback
+        tb = traceback.format_exc()
+        logger.error(f"[REST] Chat error: {req.session_id}: {tb}")
+        # フロントエンドがエラー内容を確認できるように詳細を返す
+        return {
+            "response": f"DEBUG: {type(e).__name__}: {str(e)[:300]}",
+            "summary": None,
+            "shops": [],
+            "should_confirm": False,
+            "is_followup": False,
+        }
 
 
 @router.post("/finalize")

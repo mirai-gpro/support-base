@@ -86,6 +86,9 @@ class LiveRelay:
         self.state = LiveRelayState()
         self._gemini_client = genai.Client(api_key=GEMINI_API_KEY)
 
+    # Gemini 接続エラー時の最大リトライ回数
+    MAX_GEMINI_RETRIES = 3
+
     async def handle_client_ws(self, websocket: WebSocket) -> None:
         """
         クライアント WebSocket ハンドラ — メインエントリーポイント
@@ -96,10 +99,14 @@ class LiveRelay:
         await websocket.accept()
         logger.info(f"[LiveRelay] Client connected: session={self.session.session_id}")
 
+        error_retries = 0  # エラー起因の連続リトライ回数
+
         try:
             while self.state.is_running:
                 try:
                     await self._run_gemini_session(websocket)
+                    # 正常な再接続（累積文字数制限等）はカウンターをリセット
+                    error_retries = 0
                     if not self.reconnect_mgr.needs_reconnect:
                         break
                 except WebSocketDisconnect:
@@ -107,7 +114,25 @@ class LiveRelay:
                     break
                 except Exception as e:
                     if ReconnectManager.is_retriable_error(e):
-                        logger.warning(f"[LiveRelay] Retriable error: {e}")
+                        error_retries += 1
+                        logger.warning(
+                            f"[LiveRelay] Retriable error ({error_retries}/"
+                            f"{self.MAX_GEMINI_RETRIES}): {e}",
+                            exc_info=True,
+                        )
+                        if error_retries >= self.MAX_GEMINI_RETRIES:
+                            logger.error(
+                                f"[LiveRelay] Max retries exceeded "
+                                f"({self.MAX_GEMINI_RETRIES}), giving up: "
+                                f"session={self.session.session_id}"
+                            )
+                            await self._send_json(websocket, {
+                                "type": "error",
+                                "message": f"Gemini connection failed after "
+                                           f"{self.MAX_GEMINI_RETRIES} retries: "
+                                           f"{type(e).__name__}: {str(e)[:200]}",
+                            })
+                            break
                         await self._send_json(websocket, {
                             "type": "reconnecting",
                             "reason": "error",
@@ -118,10 +143,15 @@ class LiveRelay:
                     logger.error(f"[LiveRelay] Fatal error: {e}", exc_info=True)
                     await self._send_json(websocket, {
                         "type": "error",
-                        "message": str(e),
+                        "message": f"{type(e).__name__}: {str(e)[:200]}",
                     })
                     break
         finally:
+            # 正常な close frame を送信（1006 防止）
+            try:
+                await websocket.close(code=1000, reason="Session ended")
+            except Exception:
+                pass  # 既に切断済みの場合は無視
             logger.info(f"[LiveRelay] Session ended: {self.session.session_id}")
 
     async def _run_gemini_session(self, client_ws: WebSocket) -> None:
@@ -151,6 +181,11 @@ class LiveRelay:
         self.state.a2e_chunk_index = 0
         self.state.a2e_turn_complete = False
 
+        logger.info(
+            f"[LiveRelay] Connecting to Gemini: model={LIVE_API_MODEL}, "
+            f"session_count={self.reconnect_mgr.session_count + 1}, "
+            f"session={self.session.session_id}"
+        )
         async with self._gemini_client.aio.live.connect(
             model=LIVE_API_MODEL,
             config=config,
@@ -192,8 +227,17 @@ class LiveRelay:
                         raise e
                     if ReconnectManager.is_retriable_error(e):
                         self.reconnect_mgr.needs_reconnect = True
-                        logger.warning(f"[LiveRelay] Task error (retriable): {e}")
+                        logger.warning(
+                            f"[LiveRelay] Task error (retriable): "
+                            f"{type(e).__name__}: {e}",
+                            exc_info=e,
+                        )
                     else:
+                        logger.error(
+                            f"[LiveRelay] Task error (fatal): "
+                            f"{type(e).__name__}: {e}",
+                            exc_info=e,
+                        )
                         raise e
 
     async def _relay_client_to_gemini(
