@@ -193,28 +193,7 @@ class LiveRelay:
             config=config,
         ) as gemini_session:
 
-            if self.reconnect_mgr.session_count == 1:
-                # 初回接続: 挨拶抑制メッセージを送信
-                # REST API で greeting を返済みのため、Gemini の自動挨拶を防ぐ
-                try:
-                    await gemini_session.send_client_content(
-                        turns=types.Content(
-                            role="user",
-                            parts=[types.Part(
-                                text=(
-                                    "（システム通知: 挨拶はテキストで表示済みです。"
-                                    "あなたは何も話さず、ユーザーの音声入力を待ってください。"
-                                    "この通知には応答しないでください。）"
-                                )
-                            )],
-                        ),
-                        turn_complete=True,
-                    )
-                    logger.info("[LiveRelay] Initial greeting suppression sent")
-                except Exception as e:
-                    logger.warning(f"[LiveRelay] Greeting suppression failed: {e}")
-
-            elif self.reconnect_mgr.session_count > 1:
+            if self.reconnect_mgr.session_count > 1:
                 # 再接続通知 (stt_stream.py L766-776)
                 try:
                     await gemini_session.send_client_content(
