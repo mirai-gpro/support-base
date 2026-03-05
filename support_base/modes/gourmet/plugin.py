@@ -48,30 +48,37 @@ class GourmetModePlugin(BaseModePlugin):
 
     def get_system_prompt(self, language: str = "ja", context: str | None = None) -> str:
         """
-        GCS から読み込んだプロンプトを優先使用。
-        読み込み失敗時はハードコードのフォールバック。
+        Live API 用システムプロンプト。
+
+        優先順位:
+          1. ローカル prompts/concierge_{lang}.txt (常に最新を直接読み込み)
+          2. ハードコードのフォールバック
+        ※ GCS プロンプトは REST 用 (support_system_ja.txt) と異なり、
+          Live API 用は短く厳格な concierge プロンプトが必要。
+          GCS の concierge プロンプトが古い可能性があるため、ローカルを優先する。
         """
         prompt = ""
         source = "none"
 
-        # GCS/ローカルから読み込んだプロンプトを使用
-        if _PROMPTS_LOADED:
-            # Live API では concierge プロンプトを使用
-            concierge_prompts = LOADED_PROMPTS.get("concierge", {})
-            prompt = concierge_prompts.get(language, concierge_prompts.get("ja", ""))
+        # ローカルファイルを直接読み込み (GCS より優先)
+        import os
+        concierge_file = os.path.join(
+            os.path.dirname(__file__), "..", "..", "..", "prompts", f"concierge_{language}.txt"
+        )
+        concierge_file = os.path.normpath(concierge_file)
+        try:
+            with open(concierge_file, "r", encoding="utf-8") as f:
+                prompt = f.read().strip()
             if prompt and not prompt.startswith("エラー:"):
-                source = "concierge"
+                source = f"local:{concierge_file}"
+        except FileNotFoundError:
+            logger.warning(f"[GourmetPlugin] ローカルプロンプト未発見: {concierge_file}")
+        except Exception as e:
+            logger.warning(f"[GourmetPlugin] ローカルプロンプト読み込み失敗: {e}")
 
-            # concierge プロンプトがなければ chat プロンプトを試す
-            if not prompt or prompt.startswith("エラー:"):
-                chat_prompts = LOADED_PROMPTS.get("chat", {})
-                prompt = chat_prompts.get(language, chat_prompts.get("ja", ""))
-                if prompt and not prompt.startswith("エラー:"):
-                    source = "chat"
-
-        # フォールバック: プロンプトが空、エラーメッセージ、または読み込み失敗時
+        # フォールバック: ローカルファイルが読めない場合
         if not prompt or prompt.startswith("エラー:"):
-            logger.warning("[GourmetPlugin] GCS/ローカルプロンプト使用不可 → フォールバック使用")
+            logger.warning("[GourmetPlugin] ローカルプロンプト使用不可 → フォールバック使用")
             prompt = self._fallback_prompt(language)
             source = "fallback"
 
@@ -156,16 +163,9 @@ class GourmetModePlugin(BaseModePlugin):
 
     def get_initial_greeting(self, language: str = "ja", user_profile: dict | None = None) -> str:
         """
-        初回挨拶。GCS から読み込んだ INITIAL_GREETINGS を優先使用。
+        初回挨拶。Live API 用は短くシンプルに。
+        ※ GCS の挨拶が古い場合（名前を聞く等）に備え、ハードコード優先。
         """
-        # GCS から読み込んだ挨拶を使用
-        if _PROMPTS_LOADED and LOADED_GREETINGS:
-            concierge_greetings = LOADED_GREETINGS.get("concierge", {})
-            greeting = concierge_greetings.get(language)
-            if greeting:
-                return greeting
-
-        # フォールバック
         greetings = {
             "ja": "いらっしゃいませ！今日はどんなお食事をお探しですか？",
             "en": "Welcome! What kind of dining experience are you looking for today?",

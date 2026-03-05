@@ -648,13 +648,36 @@ class LiveRelay:
             shops = result.get("shops") or []
             response_text = result.get("response", "")
 
+            logger.info(
+                f"[LiveRelay] Gemini REST returned: "
+                f"shops={len(shops)}, response_len={len(response_text)}, "
+                f"session={session_id}"
+            )
+
             # enrich with Google Places / HotPepper / TripAdvisor
             # （同期API呼び出し → 別スレッドで実行）
             if shops:
+                original_shops = shops.copy()
                 area = extract_area_from_text(query, language)
-                shops = await asyncio.to_thread(
+                logger.info(
+                    f"[LiveRelay] Area extracted: '{area}', "
+                    f"enriching {len(shops)} shops"
+                )
+                enriched = await asyncio.to_thread(
                     enrich_shops_with_photos, shops, area, language
                 ) or []
+
+                if enriched:
+                    shops = enriched
+                else:
+                    # enrichment で全店舗が除外された場合、
+                    # Gemini + Google Search grounding の元データをフォールバック
+                    logger.warning(
+                        f"[LiveRelay] Enrichment filtered ALL shops. "
+                        f"Falling back to {len(original_shops)} "
+                        f"unvalidated shops from Gemini"
+                    )
+                    shops = original_shops
 
             # ショップカードをクライアントに即送信
             if shops:
