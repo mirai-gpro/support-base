@@ -646,21 +646,25 @@ class LiveRelay:
             rest_session.update_mode("chat")
             rest_session.add_message("user", query, "chat")
 
-            # Gemini REST で推論
+            # Gemini REST で推論（同期 → 別スレッドで実行しイベントループをブロックしない）
             assistant = SupportAssistant(rest_session, SYSTEM_PROMPTS)
-            result = assistant.process_user_message(query, "conversation")
+            result = await asyncio.to_thread(
+                assistant.process_user_message, query, "conversation"
+            )
 
             shops = result.get("shops") or []
             response_text = result.get("response", "")
 
             # enrich with Google Places / HotPepper / TripAdvisor
+            # （同期API呼び出し → 別スレッドで実行）
             if shops:
                 area = extract_area_from_text(query, language)
-                shops = enrich_shops_with_photos(shops, area, language) or []
+                shops = await asyncio.to_thread(
+                    enrich_shops_with_photos, shops, area, language
+                ) or []
 
-            # ショップカードをクライアントに送信
+            # ショップカードをクライアントに即送信
             if shops:
-                # REST 応答テキストも含めて送信
                 shop_messages = {
                     "ja": lambda c: f"ご希望に合うお店を{c}件ご紹介します。\n\n",
                     "en": lambda c: f"Here are {c} restaurant recommendations.\n\n",
@@ -693,8 +697,10 @@ class LiveRelay:
                     f"session={session_id}"
                 )
 
-                # 1軒目の解説を TTS で読み上げ（隙間埋め）
-                await self._tts_first_shop(shops[0], language, client_ws)
+                # 1軒目の解説を TTS で非同期に読み上げ（ショップカード送信をブロックしない）
+                asyncio.create_task(
+                    self._tts_first_shop(shops[0], language, client_ws)
+                )
             else:
                 await self._send_json(client_ws, {
                     "type": "shop_cards",
