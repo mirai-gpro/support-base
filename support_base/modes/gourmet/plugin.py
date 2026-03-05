@@ -50,22 +50,34 @@ class GourmetModePlugin(BaseModePlugin):
         読み込み失敗時はハードコードのフォールバック。
         """
         prompt = ""
+        source = "none"
 
         # GCS/ローカルから読み込んだプロンプトを使用
         if _PROMPTS_LOADED:
             # Live API では concierge プロンプトを使用
             concierge_prompts = LOADED_PROMPTS.get("concierge", {})
             prompt = concierge_prompts.get(language, concierge_prompts.get("ja", ""))
+            if prompt and not prompt.startswith("エラー:"):
+                source = "concierge"
 
             # concierge プロンプトがなければ chat プロンプトを試す
             if not prompt or prompt.startswith("エラー:"):
                 chat_prompts = LOADED_PROMPTS.get("chat", {})
                 prompt = chat_prompts.get(language, chat_prompts.get("ja", ""))
+                if prompt and not prompt.startswith("エラー:"):
+                    source = "chat"
 
         # フォールバック: プロンプトが空、エラーメッセージ、または読み込み失敗時
         if not prompt or prompt.startswith("エラー:"):
             logger.warning("[GourmetPlugin] GCS/ローカルプロンプト使用不可 → フォールバック使用")
             prompt = self._fallback_prompt(language)
+            source = "fallback"
+
+        logger.info(
+            f"[GourmetPlugin] system_prompt source={source}, "
+            f"lang={language}, len={len(prompt)}, "
+            f"preview={prompt[:120]!r}"
+        )
 
         # 再接続コンテキスト追加
         if context:
@@ -85,23 +97,32 @@ class GourmetModePlugin(BaseModePlugin):
             "ja": (
                 "あなたはグルメコンシェルジュAIです。\n"
                 "ユーザーのリクエストに対して、即座におすすめのお店を提案してください。\n\n"
-                "【最重要ルール】\n"
-                "- ユーザーが「渋谷でイタリアン」「新宿で焼肉」などリクエストしたら、追加の質問はせず、すぐにお店を提案すること\n"
-                "- 深掘りヒアリング（予算は？人数は？雰囲気は？等）は行わない\n"
-                "- 最初のリクエストで即座にお店を提案する\n\n"
+                "【絶対厳守ルール ― 必ず従うこと】\n"
+                "1. 応答は短く簡潔に。1回の発話は最大3文まで。それ以上は絶対に話さない。\n"
+                "2. ユーザーが話し終わるまで待ってから応答する。\n"
+                "3. 相手が黙っていても、こちらから一方的に話し続けない。沈黙は許容する。\n"
+                "4. 追加の質問（予算は？人数は？雰囲気は？等）は行わず、即座にお店を提案する。\n"
+                "5. 長い説明、前置き、余計な装飾は一切不要。要点だけ伝える。\n\n"
                 "【対話スタイル】\n"
-                "- 親しみやすく、でも丁寧な口調で話してください\n"
-                "- 短く簡潔に応答してください（1-2文程度）\n"
-                "- お店の名前、エリア、特徴、看板メニューを簡潔に伝える\n"
+                "- 親しみやすく、でも丁寧な口調\n"
+                "- お店の名前、エリア、特徴を簡潔に伝える\n"
+                "- 1回の提案では1〜2軒にとどめる\n\n"
+                "【禁止事項】\n"
+                "- 一人で長々と話し続けない\n"
+                "- 同じ内容を言い換えて繰り返さない\n"
             ),
             "en": (
                 "You are a Gourmet Concierge AI.\n"
                 "Immediately suggest restaurants when users make a request.\n\n"
-                "【Critical Rules】\n"
-                "- When a user asks for restaurants, suggest places immediately without asking follow-up questions\n"
-                "- Do NOT ask about budget, party size, atmosphere preferences, etc.\n"
-                "- Provide restaurant name, area, features, and signature dishes concisely\n"
-                "Keep responses short (1-2 sentences).\n"
+                "【Absolute Rules - MUST follow】\n"
+                "1. Keep responses SHORT. Maximum 3 sentences per turn. Never exceed this.\n"
+                "2. Wait for the user to finish speaking before responding.\n"
+                "3. Do NOT keep talking on your own. Silence is OK.\n"
+                "4. Do NOT ask follow-up questions (budget, party size, etc.). Suggest immediately.\n"
+                "5. No long explanations, preambles, or filler. Only key points.\n\n"
+                "【Prohibited】\n"
+                "- Talking at length by yourself\n"
+                "- Repeating the same content in different words\n"
             ),
             "ko": (
                 "당신은 맛집 컨시어지 AI입니다.\n"

@@ -574,9 +574,16 @@ class LiveRelay:
             context=context,
         )
 
+        logger.info(
+            f"[LiveRelay] system_instruction: len={len(system_instruction)}, "
+            f"preview={system_instruction[:150]!r}"
+        )
+
         config = {
             "response_modalities": ["AUDIO"],
-            "system_instruction": system_instruction,
+            "system_instruction": types.Content(
+                parts=[types.Part(text=system_instruction)]
+            ),
             "input_audio_transcription": {},
             "output_audio_transcription": {},
             "speech_config": {
