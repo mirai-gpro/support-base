@@ -22,6 +22,8 @@ stt_stream.py の GeminiLiveApp を Web 向けに再構成。
     { "type": "audio",         "data": "<base64 PCM 24kHz>" }
     { "type": "transcription", "role": "user"|"ai", "text": "..." }
     { "type": "expression",    "data": { names, frames, frame_rate } }
+    { "type": "shop_cards",    "shops": [...], "response": "..." }
+    { "type": "rest_audio",    "data": "<base64 MP3>", "text": "..." }
     { "type": "interrupted" }
     { "type": "reconnecting",  "reason": "..." }
     { "type": "reconnected",   "session_count": N }
@@ -61,6 +63,8 @@ class LiveRelayState:
     # Expression ストリーミング用
     a2e_chunk_buffer: bytearray = field(default_factory=bytearray)
     a2e_total_bytes: int = 0  # ターン内の累計音声バイト数
+    a2e_chunk_index: int = 0  # ターン内のチャンク連番
+    a2e_turn_complete: bool = False  # ターン完了フラグ（ゼロチャンク送信防止）
 
 
 class LiveRelay:
@@ -84,6 +88,9 @@ class LiveRelay:
         self.state = LiveRelayState()
         self._gemini_client = genai.Client(api_key=GEMINI_API_KEY)
 
+    # Gemini 接続エラー時の最大リトライ回数
+    MAX_GEMINI_RETRIES = 3
+
     async def handle_client_ws(self, websocket: WebSocket) -> None:
         """
         クライアント WebSocket ハンドラ — メインエントリーポイント
@@ -94,10 +101,14 @@ class LiveRelay:
         await websocket.accept()
         logger.info(f"[LiveRelay] Client connected: session={self.session.session_id}")
 
+        error_retries = 0  # エラー起因の連続リトライ回数
+
         try:
             while self.state.is_running:
                 try:
                     await self._run_gemini_session(websocket)
+                    # 正常な再接続（累積文字数制限等）はカウンターをリセット
+                    error_retries = 0
                     if not self.reconnect_mgr.needs_reconnect:
                         break
                 except WebSocketDisconnect:
@@ -105,7 +116,25 @@ class LiveRelay:
                     break
                 except Exception as e:
                     if ReconnectManager.is_retriable_error(e):
-                        logger.warning(f"[LiveRelay] Retriable error: {e}")
+                        error_retries += 1
+                        logger.warning(
+                            f"[LiveRelay] Retriable error ({error_retries}/"
+                            f"{self.MAX_GEMINI_RETRIES}): {e}",
+                            exc_info=True,
+                        )
+                        if error_retries >= self.MAX_GEMINI_RETRIES:
+                            logger.error(
+                                f"[LiveRelay] Max retries exceeded "
+                                f"({self.MAX_GEMINI_RETRIES}), giving up: "
+                                f"session={self.session.session_id}"
+                            )
+                            await self._send_json(websocket, {
+                                "type": "error",
+                                "message": f"Gemini connection failed after "
+                                           f"{self.MAX_GEMINI_RETRIES} retries: "
+                                           f"{type(e).__name__}: {str(e)[:200]}",
+                            })
+                            break
                         await self._send_json(websocket, {
                             "type": "reconnecting",
                             "reason": "error",
@@ -116,10 +145,15 @@ class LiveRelay:
                     logger.error(f"[LiveRelay] Fatal error: {e}", exc_info=True)
                     await self._send_json(websocket, {
                         "type": "error",
-                        "message": str(e),
+                        "message": f"{type(e).__name__}: {str(e)[:200]}",
                     })
                     break
         finally:
+            # 正常な close frame を送信（1006 防止）
+            try:
+                await websocket.close(code=1000, reason="Session ended")
+            except Exception:
+                pass  # 既に切断済みの場合は無視
             logger.info(f"[LiveRelay] Session ended: {self.session.session_id}")
 
     async def _run_gemini_session(self, client_ws: WebSocket) -> None:
@@ -146,7 +180,14 @@ class LiveRelay:
         self.state.ai_transcript_buffer = ""
         self.state.a2e_chunk_buffer = bytearray()
         self.state.a2e_total_bytes = 0
+        self.state.a2e_chunk_index = 0
+        self.state.a2e_turn_complete = False
 
+        logger.info(
+            f"[LiveRelay] Connecting to Gemini: model={LIVE_API_MODEL}, "
+            f"session_count={self.reconnect_mgr.session_count + 1}, "
+            f"session={self.session.session_id}"
+        )
         async with self._gemini_client.aio.live.connect(
             model=LIVE_API_MODEL,
             config=config,
@@ -188,8 +229,17 @@ class LiveRelay:
                         raise e
                     if ReconnectManager.is_retriable_error(e):
                         self.reconnect_mgr.needs_reconnect = True
-                        logger.warning(f"[LiveRelay] Task error (retriable): {e}")
+                        logger.warning(
+                            f"[LiveRelay] Task error (retriable): "
+                            f"{type(e).__name__}: {e}",
+                            exc_info=e,
+                        )
                     else:
+                        logger.error(
+                            f"[LiveRelay] Task error (fatal): "
+                            f"{type(e).__name__}: {e}",
+                            exc_info=e,
+                        )
                         raise e
 
     async def _relay_client_to_gemini(
@@ -264,14 +314,10 @@ class LiveRelay:
 
                 sc = response.server_content
                 if not sc:
-                    # TODO: tool_call ハンドリング未実装
-                    # Gemini がレストラン検索等の Function Calling を返す場合、
-                    # ここで response.tool_call を処理し、結果を Gemini に返す必要がある。
-                    # 現状: Live API でお店検索は動作しない（REST /api/v2/rest/chat のみ対応）
+                    # --- Function Calling ハンドリング ---
                     if hasattr(response, 'tool_call') and response.tool_call:
-                        logger.warning(
-                            f"[LiveRelay] Tool call received but not implemented: "
-                            f"{response.tool_call}"
+                        await self._handle_tool_call(
+                            response.tool_call, gemini_session, client_ws
                         )
                     continue
 
@@ -286,6 +332,8 @@ class LiveRelay:
                     self.state.ai_transcript_buffer = ""
                     self.state.a2e_chunk_buffer = bytearray()
                     self.state.a2e_total_bytes = 0
+                    self.state.a2e_chunk_index = 0
+                    self.state.a2e_turn_complete = False
                     await self._send_json(client_ws, {"type": "interrupted"})
                     continue
 
@@ -324,26 +372,41 @@ class LiveRelay:
                                     "type": "audio",
                                     "data": base64.b64encode(audio_data).decode(),
                                 })
-                                # A2E用にバッファに蓄積（ストリーミング）
+                                # A2E用にバッファに蓄積
+                                # 方針: 初回0.25秒で即送信 + 残りはturn_completeまで一括
+                                # (チャンク分割を最小化し、REST同等の精度を実現)
                                 self.state.a2e_chunk_buffer.extend(audio_data)
                                 self.state.a2e_total_bytes += len(audio_data)
 
-                                # 初回チャンクは0.25秒で即発火（口の動き開始を最速に）
-                                # 2回目以降は1.0秒で精度を優先
-                                A2E_FIRST_CHUNK = 24000 * 2 // 4   # 12000 bytes = 0.25s
-                                A2E_NORMAL_CHUNK = 24000 * 2        # 48000 bytes = 1.0s
-                                is_first = self.state.a2e_total_bytes <= A2E_FIRST_CHUNK + A2E_NORMAL_CHUNK
-                                threshold = A2E_FIRST_CHUNK if self.state.a2e_total_bytes <= A2E_FIRST_CHUNK else A2E_NORMAL_CHUNK
+                                A2E_FIRST_CHUNK = 24000 * 2 // 4   # 12,000 bytes = 0.25s
+                                A2E_MAX_BUFFER = 24000 * 2 * 10    # 480,000 bytes = 10s (安全弁)
 
-                                if len(self.state.a2e_chunk_buffer) >= threshold:
+                                if self.state.a2e_chunk_index == 0:
+                                    # 初回: 0.25秒で即座にリップシンク開始
+                                    if len(self.state.a2e_chunk_buffer) >= A2E_FIRST_CHUNK:
+                                        chunk = bytes(self.state.a2e_chunk_buffer)
+                                        self.state.a2e_chunk_buffer = bytearray()
+                                        self.state.a2e_chunk_index += 1
+                                        asyncio.create_task(
+                                            self._send_expression_chunk(
+                                                client_ws, chunk,
+                                                is_first=True,
+                                                chunk_index=0,
+                                            )
+                                        )
+                                elif len(self.state.a2e_chunk_buffer) >= A2E_MAX_BUFFER:
+                                    # 安全弁: 10秒超の場合のみ分割（通常は到達しない）
                                     chunk = bytes(self.state.a2e_chunk_buffer)
                                     self.state.a2e_chunk_buffer = bytearray()
+                                    chunk_index = self.state.a2e_chunk_index
+                                    self.state.a2e_chunk_index += 1
                                     asyncio.create_task(
                                         self._send_expression_chunk(
                                             client_ws, chunk,
-                                            is_first=is_first,
+                                            chunk_index=chunk_index,
                                         )
                                     )
+                                # else: バッファに溜め続ける（turn_completeで一括処理）
 
                 # --- ターン完了 (stt_stream.py L600-645) ---
                 if hasattr(sc, "turn_complete") and sc.turn_complete:
@@ -394,6 +457,9 @@ class LiveRelay:
         self.state.ai_transcript_buffer = ""
 
         # --- A2E → Expression（アバター連携） ---
+        # ターン完了フラグを立て、以降のゼロチャンク送信を防止（P1対応）
+        self.state.a2e_turn_complete = True
+
         # 残りのバッファをフラッシュ（最後のチャンク）
         if self.a2e_client and len(self.state.a2e_chunk_buffer) > 0:
             chunk = bytes(self.state.a2e_chunk_buffer)
@@ -404,8 +470,12 @@ class LiveRelay:
             if len(chunk) < MIN_CHUNK_BYTES:
                 chunk = chunk + b'\x00' * (MIN_CHUNK_BYTES - len(chunk))
 
+            chunk_index = self.state.a2e_chunk_index
+            self.state.a2e_chunk_index += 1
             await self._send_expression_chunk(
-                client_ws, chunk, is_final=True,
+                client_ws, chunk,
+                is_final=True,
+                chunk_index=chunk_index,
             )
         self.state.a2e_total_bytes = 0
 
@@ -415,19 +485,30 @@ class LiveRelay:
         audio_chunk: bytes,
         is_first: bool = False,
         is_final: bool = False,
+        chunk_index: int = 0,
     ) -> None:
         """
         音声チャンクから expression を生成してクライアントへ送信（ストリーミング対応）
 
-        1秒ごとの音声チャンクを audio2exp に送信し、結果を即座にクライアントへ転送する。
+        初回0.25sチャンク + 残りturn_complete一括で audio2exp に送信し、
+        結果を即座にクライアントへ転送する。
         フロントエンドの queueLiveExpressionFrames() がバッファに追加して再生する。
         """
+        # P1対応: turn_complete 後はexpressionを送信しない（ゼロチャンク防止）
+        if self.state.a2e_turn_complete and not is_final:
+            logger.debug(
+                f"[LiveRelay] Skipping A2E chunk after turn_complete: "
+                f"chunk_index={chunk_index}, session={self.session.session_id}"
+            )
+            return
+
         try:
             audio_b64 = base64.b64encode(audio_chunk).decode()
             pcm_duration_ms = len(audio_chunk) // (24000 * 2) * 1000
             logger.info(
                 f"[LiveRelay] A2E chunk: "
                 f"{len(audio_chunk)} bytes (~{pcm_duration_ms}ms), "
+                f"chunk_index={chunk_index}, "
                 f"is_first={is_first}, is_final={is_final}, "
                 f"session={self.session.session_id}"
             )
@@ -440,29 +521,346 @@ class LiveRelay:
                 is_final=is_final,
             )
             if result and result.frames:
+                # P3対応: jawOpen スケーリング（平均0.03→0.08〜0.12を目指す）
+                JAW_OPEN_SCALE = 1.8
+                try:
+                    jaw_idx = result.names.index("jawOpen")
+                    for frame in result.frames:
+                        frame[jaw_idx] = min(frame[jaw_idx] * JAW_OPEN_SCALE, 1.0)
+                except ValueError:
+                    pass  # jawOpen が names に存在しない場合はスキップ
+
                 non_zero = sum(
                     1 for f in result.frames if any(v > 0.001 for v in f)
                 )
+                # P2対応: chunk_index と is_final をメッセージに追加
                 await self._send_json(client_ws, {
                     "type": "expression",
                     "data": {
                         "names": result.names,
                         "frames": result.frames,
                         "frame_rate": result.frame_rate,
+                        "chunk_index": chunk_index,
+                        "is_final": is_final,
                     },
                 })
+                # 入力長 vs 出力フレーム数の比較ログ（同期ズレ診断用）
+                input_duration_s = len(audio_chunk) / (24000 * 2)
+                output_duration_s = len(result.frames) / result.frame_rate
+                diff_s = output_duration_s - input_duration_s
                 logger.info(
-                    f"[LiveRelay] Expression chunk sent: "
-                    f"{len(result.frames)} frames "
-                    f"({non_zero} non-zero)"
+                    f"[LiveRelay] A2E sync: chunk#{chunk_index}: "
+                    f"input={input_duration_s:.3f}s, "
+                    f"output={len(result.frames)} frames "
+                    f"({output_duration_s:.3f}s), "
+                    f"diff={diff_s:+.3f}s, "
+                    f"non_zero={non_zero}, is_final={is_final}"
                 )
             else:
                 logger.warning(
                     f"[LiveRelay] A2E chunk returned no frames: "
+                    f"chunk_index={chunk_index}, "
                     f"session={self.session.session_id}"
                 )
         except Exception as e:
             logger.warning(f"[LiveRelay] A2E chunk error (non-fatal): {e}")
+
+    async def _handle_tool_call(
+        self, tool_call, gemini_session, client_ws: WebSocket
+    ) -> None:
+        """
+        Gemini からの Function Call を処理
+
+        search_restaurants の場合:
+        1. REST API ロジックでレストラン検索 + enrich
+        2. ショップカードを WebSocket でクライアントに送信
+        3. 1軒目の解説を TTS で音声化してクライアントに送信（隙間埋め）
+        4. tool_response を Gemini に返して会話を継続
+        """
+        function_responses = []
+
+        for fc in tool_call.function_calls:
+            logger.info(
+                f"[LiveRelay] Tool call: name={fc.name}, "
+                f"args={fc.args}, session={self.session.session_id}"
+            )
+
+            if fc.name == "search_restaurants":
+                result = await self._execute_restaurant_search(
+                    fc.args, client_ws
+                )
+                function_responses.append(
+                    types.FunctionResponse(
+                        id=fc.id,
+                        name=fc.name,
+                        response=result,
+                    )
+                )
+            else:
+                logger.warning(f"[LiveRelay] Unknown tool: {fc.name}")
+                function_responses.append(
+                    types.FunctionResponse(
+                        id=fc.id,
+                        name=fc.name,
+                        response={"error": f"Unknown tool: {fc.name}"},
+                    )
+                )
+
+        # tool_response を Gemini に返す → Gemini が続きの音声を生成
+        if function_responses:
+            await gemini_session.send_tool_response(
+                function_responses=function_responses
+            )
+            logger.info(
+                f"[LiveRelay] Tool response sent: "
+                f"{len(function_responses)} responses"
+            )
+
+    async def _execute_restaurant_search(
+        self, args: dict, client_ws: WebSocket
+    ) -> dict:
+        """
+        search_restaurants ツールの実行
+
+        REST API ロジック (SupportAssistant + enrich_shops_with_photos) を呼び出し、
+        ショップカードを WebSocket で送信。1軒目の解説を TTS で読み上げ。
+        """
+        from support_base.core.support_core import (
+            SYSTEM_PROMPTS,
+            SupportSession,
+            SupportAssistant,
+        )
+        from support_base.core.api_integrations import (
+            enrich_shops_with_photos,
+            extract_area_from_text,
+        )
+
+        query = args.get("query", "")
+        language = self.session.language or "ja"
+        session_id = self.session.session_id
+
+        logger.info(
+            f"[LiveRelay] Restaurant search: query={query!r}, "
+            f"lang={language}, session={session_id}"
+        )
+
+        try:
+            # REST 用の SupportSession を作成/取得
+            rest_session = SupportSession(session_id)
+            rest_data = rest_session.get_data()
+            if not rest_data:
+                rest_session.initialize({}, language=language, mode="chat")
+
+            rest_session.update_language(language)
+            rest_session.update_mode("chat")
+            rest_session.add_message("user", query, "chat")
+
+            # Gemini REST で推論（同期 → 別スレッドで実行しイベントループをブロックしない）
+            assistant = SupportAssistant(rest_session, SYSTEM_PROMPTS)
+            result = await asyncio.to_thread(
+                assistant.process_user_message, query, "conversation"
+            )
+
+            shops = result.get("shops") or []
+            response_text = result.get("response", "")
+
+            # enrich with Google Places / HotPepper / TripAdvisor
+            # （同期API呼び出し → 別スレッドで実行）
+            if shops:
+                area = extract_area_from_text(query, language)
+                shops = await asyncio.to_thread(
+                    enrich_shops_with_photos, shops, area, language
+                ) or []
+
+            # ショップカードをクライアントに即送信
+            if shops:
+                shop_messages = {
+                    "ja": lambda c: f"ご希望に合うお店を{c}件ご紹介します。\n\n",
+                    "en": lambda c: f"Here are {c} restaurant recommendations.\n\n",
+                    "zh": lambda c: f"为您推荐{c}家餐厅。\n\n",
+                    "ko": lambda c: f"고객님께 {c}개의 식당을 추천합니다.\n\n",
+                }
+                intro = shop_messages.get(language, shop_messages["ja"])
+
+                shop_list = []
+                for i, shop in enumerate(shops, 1):
+                    name = shop.get("name", "")
+                    shop_area = shop.get("area", "")
+                    description = shop.get("description", "")
+                    if shop_area:
+                        shop_list.append(
+                            f"{i}. **{name}**({shop_area}): {description}"
+                        )
+                    else:
+                        shop_list.append(f"{i}. **{name}**: {description}")
+
+                display_text = intro(len(shops)) + "\n\n".join(shop_list)
+
+                await self._send_json(client_ws, {
+                    "type": "shop_cards",
+                    "shops": shops,
+                    "response": display_text,
+                })
+                logger.info(
+                    f"[LiveRelay] Shop cards sent: {len(shops)} shops, "
+                    f"session={session_id}"
+                )
+
+                # 1軒目の解説を TTS で非同期に読み上げ（ショップカード送信をブロックしない）
+                asyncio.create_task(
+                    self._tts_first_shop(shops[0], language, client_ws)
+                )
+            else:
+                await self._send_json(client_ws, {
+                    "type": "shop_cards",
+                    "shops": [],
+                    "response": response_text,
+                })
+
+            # Gemini に返す tool_result（短い要約）
+            shop_names = [s.get("name", "") for s in shops[:5]]
+            return {
+                "status": "success",
+                "shop_count": len(shops),
+                "shop_names": shop_names,
+                "message": (
+                    f"{len(shops)}件のお店を見つけてショップカードを表示しました。"
+                    "1軒目の解説は音声で読み上げ済みです。"
+                    "ユーザーにはカードが見えています。"
+                    "この後は短く「気になるお店はありますか？」等と聞いてください。"
+                    if shops
+                    else "条件に合うお店が見つかりませんでした。別の条件を提案してください。"
+                ),
+            }
+
+        except Exception as e:
+            logger.error(
+                f"[LiveRelay] Restaurant search error: {e}",
+                exc_info=True,
+            )
+            await self._send_json(client_ws, {
+                "type": "shop_cards",
+                "shops": [],
+                "response": "お店の検索中にエラーが発生しました。",
+            })
+            return {
+                "status": "error",
+                "message": f"検索エラー: {type(e).__name__}: {str(e)[:200]}",
+            }
+
+    async def _tts_first_shop(
+        self, shop: dict, language: str, client_ws: WebSocket
+    ) -> None:
+        """
+        1軒目のお店の解説を TTS で音声化してクライアントに送信（隙間埋め）
+
+        Live API の音声とは別に REST API の TTS を使用。
+        フロントエンドは rest_audio タイプで受信し、Live 音声の後に再生する。
+        """
+        try:
+            from google.cloud import texttospeech
+        except ImportError:
+            logger.warning("[LiveRelay] TTS not available for first shop readout")
+            return
+
+        name = shop.get("name", "")
+        area = shop.get("area", "")
+        description = shop.get("description", "")
+        specialty = shop.get("specialty", "")
+        rating = shop.get("rating")
+
+        # 読み上げテキストを構築
+        tts_parts = {
+            "ja": self._build_shop_narration_ja,
+            "en": self._build_shop_narration_en,
+        }
+        builder = tts_parts.get(language, self._build_shop_narration_ja)
+        narration = builder(name, area, description, specialty, rating)
+
+        if not narration:
+            return
+
+        try:
+            tts_client = texttospeech.TextToSpeechClient()
+            voice_map = {
+                "ja": ("ja-JP", "ja-JP-Chirp3-HD-Leda"),
+                "en": ("en-US", "en-US-Chirp3-HD-Leda"),
+                "zh": ("cmn-CN", "cmn-CN-Chirp3-HD-Leda"),
+                "ko": ("ko-KR", "ko-KR-Chirp3-HD-Leda"),
+            }
+            lang_code, voice_name = voice_map.get(
+                language, voice_map["ja"]
+            )
+
+            synthesis_input = texttospeech.SynthesisInput(text=narration)
+            voice = texttospeech.VoiceSelectionParams(
+                language_code=lang_code, name=voice_name
+            )
+            audio_config = texttospeech.AudioConfig(
+                audio_encoding=texttospeech.AudioEncoding.MP3,
+                speaking_rate=1.0,
+            )
+
+            response = tts_client.synthesize_speech(
+                input=synthesis_input, voice=voice, audio_config=audio_config
+            )
+
+            import base64 as b64
+            audio_base64 = b64.b64encode(response.audio_content).decode()
+
+            await self._send_json(client_ws, {
+                "type": "rest_audio",
+                "data": audio_base64,
+                "text": narration,
+            })
+            logger.info(
+                f"[LiveRelay] First shop TTS sent: {name}, "
+                f"audio_size={len(audio_base64) // 1024}KB"
+            )
+
+        except Exception as e:
+            logger.warning(f"[LiveRelay] First shop TTS error: {e}")
+
+    @staticmethod
+    def _build_shop_narration_ja(
+        name: str, area: str, description: str,
+        specialty: str, rating: float | None,
+    ) -> str:
+        """1軒目の日本語ナレーション構築"""
+        parts = []
+        if name:
+            parts.append(f"まず1軒目、{name}です。")
+        if area:
+            parts.append(f"{area}にあります。")
+        if description:
+            # 長すぎる場合は切り詰め
+            desc = description[:150] if len(description) > 150 else description
+            parts.append(desc)
+        if specialty:
+            parts.append(f"看板メニューは{specialty}です。")
+        if rating and rating >= 4.0:
+            parts.append(f"評価は{rating}と高評価です。")
+        return "".join(parts)
+
+    @staticmethod
+    def _build_shop_narration_en(
+        name: str, area: str, description: str,
+        specialty: str, rating: float | None,
+    ) -> str:
+        """1軒目の英語ナレーション構築"""
+        parts = []
+        if name:
+            parts.append(f"First up, {name}.")
+        if area:
+            parts.append(f"Located in {area}.")
+        if description:
+            desc = description[:150] if len(description) > 150 else description
+            parts.append(desc)
+        if specialty:
+            parts.append(f"Their specialty is {specialty}.")
+        if rating and rating >= 4.0:
+            parts.append(f"Rated {rating} stars.")
+        return " ".join(parts)
 
     def _build_live_config(self, context: str | None = None) -> dict:
         """
@@ -480,9 +878,16 @@ class LiveRelay:
             context=context,
         )
 
+        logger.info(
+            f"[LiveRelay] system_instruction: len={len(system_instruction)}, "
+            f"preview={system_instruction[:150]!r}"
+        )
+
         config = {
             "response_modalities": ["AUDIO"],
-            "system_instruction": system_instruction,
+            "system_instruction": types.Content(
+                parts=[types.Part(text=system_instruction)]
+            ),
             "input_audio_transcription": {},
             "output_audio_transcription": {},
             "speech_config": {

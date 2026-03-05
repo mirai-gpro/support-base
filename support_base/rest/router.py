@@ -137,7 +137,12 @@ def _normalize_mode(mode: str) -> str:
 
 # === ヘルパー ===
 
-async def _get_expression_frames(audio_base64: str, session_id: str, audio_format: str = "mp3"):
+async def _get_expression_frames(
+    audio_base64: str,
+    session_id: str,
+    audio_format: str = "mp3",
+    sample_rate: int | None = None,
+):
     """
     Audio2Expression サービスから表情フレームを取得
 
@@ -151,17 +156,33 @@ async def _get_expression_frames(audio_base64: str, session_id: str, audio_forma
                 audio_base64=audio_base64,
                 session_id=session_id,
                 audio_format=audio_format,
+                sample_rate=sample_rate,
             )
             if result and result.frames:
+                # jawOpen スケーリング（P3対応: 平均0.03→0.08〜0.12）
+                JAW_OPEN_SCALE = 1.8
+                try:
+                    jaw_idx = result.names.index("jawOpen")
+                    for frame in result.frames:
+                        frame[jaw_idx] = min(frame[jaw_idx] * JAW_OPEN_SCALE, 1.0)
+                except ValueError:
+                    pass
                 return {
                     "names": result.names,
                     "frames": result.frames,
                     "frame_rate": result.frame_rate,
                 }
-            logger.warning(f"[Audio2Exp] A2E returned no frames: session={session_id}")
+            logger.warning(
+                f"[Audio2Exp] A2E returned no frames: session={session_id}, "
+                f"result_type={type(result).__name__}, "
+                f"has_frames={hasattr(result, 'frames') if result else 'N/A'}"
+            )
             return None
         except Exception as e:
-            logger.warning(f"[Audio2Exp] A2E client error: {e}")
+            logger.error(
+                f"[Audio2Exp] A2E client error: {e}, session={session_id}",
+                exc_info=True,
+            )
             return None
 
     # 2. フォールバック: A2E_SERVICE_URL への直接リクエスト (同期)
@@ -184,10 +205,13 @@ async def _get_expression_frames(audio_base64: str, session_id: str, audio_forma
             result = resp.json()
             logger.info(f"[Audio2Exp] OK: {len(result.get('frames', []))} frames")
             return result
-        logger.warning(f"[Audio2Exp] Failed: status={resp.status_code}, body={resp.text[:200]}")
+        logger.error(
+            f"[Audio2Exp] Failed: status={resp.status_code}, "
+            f"body={resp.text[:300]}, session={session_id}"
+        )
         return None
     except Exception as e:
-        logger.warning(f"[Audio2Exp] Error: {e}")
+        logger.error(f"[Audio2Exp] Error: {e}, session={session_id}", exc_info=True)
         return None
 
 
@@ -374,8 +398,17 @@ async def rest_chat(req: ChatRequest):
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"[REST] Chat error: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
+        import traceback
+        tb = traceback.format_exc()
+        logger.error(f"[REST] Chat error: {req.session_id}: {tb}")
+        # フロントエンドがエラー内容を確認できるように詳細を返す
+        return {
+            "response": f"DEBUG: {type(e).__name__}: {str(e)[:300]}",
+            "summary": None,
+            "shops": [],
+            "should_confirm": False,
+            "is_followup": False,
+        }
 
 
 @router.post("/finalize")
@@ -519,7 +552,7 @@ async def rest_tts_synthesize(req: TTSRequest):
                 # リトライ付き A2E 呼び出し（最大2回）
                 for attempt in range(2):
                     expression_data = await _get_expression_frames(
-                        a2e_audio_b64, req.session_id, "pcm"
+                        a2e_audio_b64, req.session_id, "pcm", sample_rate=24000
                     )
                     if expression_data:
                         break

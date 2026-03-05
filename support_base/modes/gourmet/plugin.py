@@ -12,6 +12,8 @@ Live API / REST 両方の経路で使用。
 
 import logging
 
+from google.genai import types
+
 from support_base.modes.base_mode import BaseModePlugin
 
 logger = logging.getLogger(__name__)
@@ -50,22 +52,34 @@ class GourmetModePlugin(BaseModePlugin):
         読み込み失敗時はハードコードのフォールバック。
         """
         prompt = ""
+        source = "none"
 
         # GCS/ローカルから読み込んだプロンプトを使用
         if _PROMPTS_LOADED:
             # Live API では concierge プロンプトを使用
             concierge_prompts = LOADED_PROMPTS.get("concierge", {})
             prompt = concierge_prompts.get(language, concierge_prompts.get("ja", ""))
+            if prompt and not prompt.startswith("エラー:"):
+                source = "concierge"
 
             # concierge プロンプトがなければ chat プロンプトを試す
             if not prompt or prompt.startswith("エラー:"):
                 chat_prompts = LOADED_PROMPTS.get("chat", {})
                 prompt = chat_prompts.get(language, chat_prompts.get("ja", ""))
+                if prompt and not prompt.startswith("エラー:"):
+                    source = "chat"
 
         # フォールバック: プロンプトが空、エラーメッセージ、または読み込み失敗時
         if not prompt or prompt.startswith("エラー:"):
             logger.warning("[GourmetPlugin] GCS/ローカルプロンプト使用不可 → フォールバック使用")
             prompt = self._fallback_prompt(language)
+            source = "fallback"
+
+        logger.info(
+            f"[GourmetPlugin] system_prompt source={source}, "
+            f"lang={language}, len={len(prompt)}, "
+            f"preview={prompt[:120]!r}"
+        )
 
         # 再接続コンテキスト追加
         if context:
@@ -85,23 +99,41 @@ class GourmetModePlugin(BaseModePlugin):
             "ja": (
                 "あなたはグルメコンシェルジュAIです。\n"
                 "ユーザーのリクエストに対して、即座におすすめのお店を提案してください。\n\n"
-                "【最重要ルール】\n"
-                "- ユーザーが「渋谷でイタリアン」「新宿で焼肉」などリクエストしたら、追加の質問はせず、すぐにお店を提案すること\n"
-                "- 深掘りヒアリング（予算は？人数は？雰囲気は？等）は行わない\n"
-                "- 最初のリクエストで即座にお店を提案する\n\n"
+                "【絶対厳守ルール ― 必ず従うこと】\n"
+                "1. お店の紹介・説明以外の発話は、必ず15文字以内。例外なし。\n"
+                "   OK: 「いいですね！」「お探しします」「他にありますか？」\n"
+                "   NG: 「素敵なリクエストですね！早速お探しいたします」\n"
+                "2. お店の紹介・説明は30文字以内（1軒分のみ）。\n"
+                "3. 1回の発話は最大2文まで。それ以上は絶対に話さない。\n"
+                "4. ユーザーが話し終わるまで待ってから応答する。\n"
+                "5. 相手が黙っていても一方的に話し続けない。沈黙は許容する。\n"
+                "6. 追加の質問（予算は？人数は？雰囲気は？等）は行わず即座にお店を提案する。\n"
+                "7. 前置き、余計な装飾、丁寧すぎる敬語は不要。\n\n"
                 "【対話スタイル】\n"
-                "- 親しみやすく、でも丁寧な口調で話してください\n"
-                "- 短く簡潔に応答してください（1-2文程度）\n"
-                "- お店の名前、エリア、特徴、看板メニューを簡潔に伝える\n"
+                "- 親しみやすく、でも丁寧な口調\n"
+                "- 「はい」「ええ」など短い相槌を使う\n"
+                "- 1回の提案では1〜2軒にとどめる\n\n"
+                "【禁止事項】\n"
+                "- 一人で長々と話し続けない\n"
+                "- 同じ内容を言い換えて繰り返さない\n"
+                "- 復唱禁止（「〜ですね、かしこまりました」は長い）\n"
             ),
             "en": (
                 "You are a Gourmet Concierge AI.\n"
                 "Immediately suggest restaurants when users make a request.\n\n"
-                "【Critical Rules】\n"
-                "- When a user asks for restaurants, suggest places immediately without asking follow-up questions\n"
-                "- Do NOT ask about budget, party size, atmosphere preferences, etc.\n"
-                "- Provide restaurant name, area, features, and signature dishes concisely\n"
-                "Keep responses short (1-2 sentences).\n"
+                "【Absolute Rules - MUST follow】\n"
+                "1. Non-restaurant responses MUST be under 10 words. No exceptions.\n"
+                "   OK: 'Sure!', 'Searching now.', 'Anything else?'\n"
+                "   NG: 'That sounds like a wonderful request! Let me search for you right away.'\n"
+                "2. Restaurant descriptions: under 20 words (one restaurant only).\n"
+                "3. Maximum 2 sentences per turn. Never exceed this.\n"
+                "4. Wait for the user to finish speaking before responding.\n"
+                "5. Do NOT ask follow-up questions (budget, party size, etc.).\n"
+                "6. No preambles, filler, or overly polite language.\n\n"
+                "【Prohibited】\n"
+                "- Talking at length by yourself\n"
+                "- Repeating the same content in different words\n"
+                "- Parroting back the user's request\n"
             ),
             "ko": (
                 "당신은 맛집 컨시어지 AI입니다.\n"
@@ -141,6 +173,36 @@ class GourmetModePlugin(BaseModePlugin):
             "zh": "欢迎！今天想找什么样的餐厅呢？",
         }
         return greetings.get(language, greetings["ja"])
+
+    def get_live_api_tools(self) -> list:
+        """
+        Live API 用 Function Calling ツール定義
+
+        search_restaurants ツール:
+          Gemini がユーザーのリクエストを受けて呼び出す。
+          バックエンドで REST API ロジック（SupportAssistant + enrich_shops_with_photos）を実行し、
+          ショップカードをクライアントに送信する。
+        """
+        search_restaurants = types.FunctionDeclaration(
+            name="search_restaurants",
+            description=(
+                "ユーザーのリクエストに基づいてレストランを検索し、ショップカードを表示する。"
+                "ユーザーが食事・レストラン・グルメに関するリクエストをしたら、"
+                "追加の質問をせず即座にこのツールを呼び出すこと。"
+                "呼び出す前に短い受けのセリフ（1文）を音声で返してからツールを呼ぶ。"
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "ユーザーのリクエスト内容（例: '渋谷でイタリアン', '新宿で焼肉'）",
+                    },
+                },
+                "required": ["query"],
+            },
+        )
+        return [types.Tool(function_declarations=[search_restaurants])]
 
     def get_memory_schema(self) -> dict:
         """グルメモード固有の長期記憶スキーマ"""
