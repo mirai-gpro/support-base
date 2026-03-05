@@ -373,6 +373,128 @@ class SupportSession:
             logger.info(f"[Session] モード更新: {mode}")
 
 
+
+# ========================================
+# チャットモード（グルメ）用フォールバックプロンプト
+# GCS/ローカルのプロンプトファイルが無い場合に使用
+# ========================================
+_CHAT_MODE_FALLBACK_PROMPTS = {
+    'ja': """あなたはグルメお店探しAIです。
+ユーザーのリクエストに対して、即座におすすめのお店を5軒提案してください。
+
+【最重要ルール】
+- ユーザーが「渋谷でイタリアン」「新宿で焼肉」など、お店探しのリクエストをしたら、追加の質問はせず、すぐに5軒のお店を提案すること
+- 深掘りヒアリング（予算は？人数は？雰囲気は？等）は行わない
+- 最初のリクエストで即座にショップカードを表示する
+
+【応答フォーマット】
+必ず以下のJSON形式で応答してください:
+```json
+{
+  "message": "ご希望に合うお店を5軒ご紹介します！",
+  "shops": [
+    {
+      "name": "店名",
+      "area": "エリア（例：渋谷）",
+      "description": "お店の特徴を1-2文で",
+      "specialty": "看板メニュー",
+      "price_range": "予算目安（例：¥3,000〜5,000）",
+      "atmosphere": "雰囲気（例：カジュアル、落ち着いた、デート向き）"
+    }
+  ]
+}
+```
+
+【重要な注意事項】
+- shopsは必ず5軒返すこと
+- Google検索の結果を参考に、実在する可能性の高い店舗を提案すること
+- ユーザーの言語に合わせてmessageを返すこと
+- JSONの前後に余計なテキストを含めないこと
+""",
+    'en': """You are a restaurant finder AI.
+When users request restaurant recommendations, immediately suggest 5 restaurants.
+
+【Critical Rules】
+- When a user asks for restaurants (e.g., "Italian in Shibuya"), suggest 5 places immediately without asking follow-up questions
+- Do NOT ask about budget, party size, atmosphere preferences, etc.
+- Show shop cards on the first request
+
+【Response Format】
+Always respond in this JSON format:
+```json
+{
+  "message": "Here are 5 restaurant recommendations for you!",
+  "shops": [
+    {
+      "name": "Restaurant Name",
+      "area": "Area (e.g., Shibuya)",
+      "description": "1-2 sentence description",
+      "specialty": "Signature dish",
+      "price_range": "Budget range",
+      "atmosphere": "Atmosphere"
+    }
+  ]
+}
+```
+- Always return exactly 5 shops
+- Use Google Search results to suggest real restaurants
+- Do not include extra text outside the JSON
+""",
+    'zh': """你是一个餐厅推荐AI。
+当用户提出餐厅需求时，立即推荐5家餐厅。
+
+【核心规则】
+- 用户说"涩谷意大利餐"等需求时，不要追问，直接推荐5家
+- 不要询问预算、人数、氛围等
+- 第一次请求就展示店铺卡片
+
+【回复格式】
+必须使用以下JSON格式：
+```json
+{
+  "message": "为您推荐5家餐厅！",
+  "shops": [
+    {
+      "name": "店名",
+      "area": "区域",
+      "description": "1-2句描述",
+      "specialty": "招牌菜",
+      "price_range": "价格范围",
+      "atmosphere": "氛围"
+    }
+  ]
+}
+```
+""",
+    'ko': """당신은 맛집 추천 AI입니다.
+사용자의 요청에 즉시 5개 레스토랑을 추천하세요.
+
+【핵심 규칙】
+- 사용자가 "시부야에서 이탈리안" 등 요청하면 추가 질문 없이 바로 5곳 추천
+- 예산, 인원, 분위기 등 물어보지 말 것
+- 첫 요청에 즉시 매장 카드 표시
+
+【응답 형식】
+반드시 다음 JSON 형식으로 응답:
+```json
+{
+  "message": "추천 레스토랑 5곳입니다!",
+  "shops": [
+    {
+      "name": "매장명",
+      "area": "지역",
+      "description": "1-2문장 설명",
+      "specialty": "대표 메뉴",
+      "price_range": "가격대",
+      "atmosphere": "분위기"
+    }
+  ]
+}
+```
+"""
+}
+
+
 class SupportAssistant:
     """サポートアシスタント - モード対応版"""
 
@@ -384,6 +506,20 @@ class SupportAssistant:
         # ★★★ モードに応じたプロンプトを選択 ★★★
         mode_prompts = system_prompts.get(self.mode, SYSTEM_PROMPTS.get('chat', {}))
         self.system_prompt = mode_prompts.get(self.language, mode_prompts.get('ja', ''))
+
+        # ★★★ chatモード: プロンプトが不正/不足の場合はフォールバック ★★★
+        # GCS読み込み失敗時、エラーメッセージ時、またはGCSプロンプトに
+        # JSON応答フォーマット指示が含まれていない場合はフォールバックを使用
+        if self.mode == 'chat' and (
+            not self.system_prompt
+            or self.system_prompt.startswith('エラー:')
+            or '"shops"' not in self.system_prompt
+        ):
+            old_prompt = self.system_prompt[:80] if self.system_prompt else "(empty)"
+            self.system_prompt = _CHAT_MODE_FALLBACK_PROMPTS.get(
+                self.language, _CHAT_MODE_FALLBACK_PROMPTS['ja']
+            )
+            logger.info(f"[Assistant] chatモード: フォールバックプロンプト使用（即時提案モード）旧プロンプト: {old_prompt}")
 
         # ★★★ 長期記憶のコンテキストをシステムプロンプトに追加（コンシェルジュモードのみ） ★★★
         session_data = session.get_data()

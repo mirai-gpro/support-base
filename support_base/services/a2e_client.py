@@ -6,6 +6,7 @@ audio2exp-service (Cloud Run) への HTTP リクエスト。
 REST経路とLive API経路の両方で使用。
 """
 
+import asyncio
 import logging
 from dataclasses import dataclass
 
@@ -72,46 +73,70 @@ class A2EClient:
         if sample_rate:
             payload["sample_rate"] = sample_rate
 
-        try:
-            audio_size_kb = len(audio_base64) * 3 // 4 // 1024
-            logger.info(
-                f"[A2E] Request: format={audio_format}, "
-                f"size={audio_size_kb}KB, "
-                f"sample_rate={sample_rate}, "
-                f"session={session_id}"
-            )
-            response = await self._client.post(url, json=payload)
-            response.raise_for_status()
-            data = response.json()
+        audio_size_kb = len(audio_base64) * 3 // 4 // 1024
+        max_retries = 3
+        retry_delays = [0.3, 0.6]  # 503 リトライ間隔
 
-            result = A2EResult(
-                names=data["names"],
-                frames=data["frames"],
-                frame_rate=data.get("frame_rate", 30),
-            )
+        for attempt in range(max_retries):
+            try:
+                if attempt == 0:
+                    logger.info(
+                        f"[A2E] Request: format={audio_format}, "
+                        f"size={audio_size_kb}KB, "
+                        f"sample_rate={sample_rate}, "
+                        f"session={session_id}"
+                    )
+                else:
+                    logger.info(
+                        f"[A2E] Retry {attempt}/{max_retries - 1}: "
+                        f"session={session_id}"
+                    )
 
-            frame_count = len(result.frames)
-            # 非ゼロフレーム数を確認（デバッグ用）
-            non_zero = sum(
-                1 for f in result.frames if any(v > 0.001 for v in f)
-            )
-            logger.info(
-                f"[A2E] OK: {frame_count} frames "
-                f"({non_zero} non-zero), "
-                f"session={session_id}"
-            )
-            return result
+                response = await self._client.post(url, json=payload)
+                response.raise_for_status()
+                data = response.json()
 
-        except httpx.TimeoutException:
-            logger.warning(
-                f"[A2E] Timeout ({A2E_TIMEOUT_SECONDS}s): "
-                f"format={audio_format}, size={audio_size_kb}KB, "
-                f"session={session_id}"
-            )
-            return None
-        except Exception as e:
-            logger.error(f"[A2E] Error: {e}, session={session_id}")
-            return None
+                result = A2EResult(
+                    names=data["names"],
+                    frames=data["frames"],
+                    frame_rate=data.get("frame_rate", 30),
+                )
+
+                frame_count = len(result.frames)
+                non_zero = sum(
+                    1 for f in result.frames if any(v > 0.001 for v in f)
+                )
+                logger.info(
+                    f"[A2E] OK: {frame_count} frames "
+                    f"({non_zero} non-zero), "
+                    f"session={session_id}"
+                )
+                return result
+
+            except httpx.HTTPStatusError as e:
+                if e.response.status_code == 503 and attempt < max_retries - 1:
+                    delay = retry_delays[min(attempt, len(retry_delays) - 1)]
+                    logger.warning(
+                        f"[A2E] 503 Service Unavailable, "
+                        f"retry in {delay}s (attempt {attempt + 1}/{max_retries}), "
+                        f"session={session_id}"
+                    )
+                    await asyncio.sleep(delay)
+                    continue
+                logger.error(f"[A2E] Error: {e}, session={session_id}")
+                return None
+            except httpx.TimeoutException:
+                logger.warning(
+                    f"[A2E] Timeout ({A2E_TIMEOUT_SECONDS}s): "
+                    f"format={audio_format}, size={audio_size_kb}KB, "
+                    f"session={session_id}"
+                )
+                return None
+            except Exception as e:
+                logger.error(f"[A2E] Error: {e}, session={session_id}")
+                return None
+
+        return None
 
     async def health_check(self) -> dict | None:
         """ヘルスチェック (GET /health)"""
