@@ -65,6 +65,8 @@ class LiveRelayState:
     a2e_total_bytes: int = 0  # ターン内の累計音声バイト数
     a2e_chunk_index: int = 0  # ターン内のチャンク連番
     a2e_turn_complete: bool = False  # ターン完了フラグ（ゼロチャンク送信防止）
+    # 音声バッファリング（REST同等リップシンク品質のため）
+    audio_buffer: bytearray = field(default_factory=bytearray)  # turn_completeまで音声を蓄積
 
 
 class LiveRelay:
@@ -182,6 +184,7 @@ class LiveRelay:
         self.state.a2e_total_bytes = 0
         self.state.a2e_chunk_index = 0
         self.state.a2e_turn_complete = False
+        self.state.audio_buffer = bytearray()
 
         logger.info(
             f"[LiveRelay] Connecting to Gemini: model={LIVE_API_MODEL}, "
@@ -334,6 +337,7 @@ class LiveRelay:
                     self.state.a2e_total_bytes = 0
                     self.state.a2e_chunk_index = 0
                     self.state.a2e_turn_complete = False
+                    self.state.audio_buffer = bytearray()
                     await self._send_json(client_ws, {"type": "interrupted"})
                     continue
 
@@ -367,46 +371,12 @@ class LiveRelay:
                         if hasattr(part, "inline_data") and part.inline_data:
                             audio_data = part.inline_data.data
                             if isinstance(audio_data, bytes):
-                                # ブラウザに音声を即時送信
-                                await self._send_json(client_ws, {
-                                    "type": "audio",
-                                    "data": base64.b64encode(audio_data).decode(),
-                                })
-                                # A2E用にバッファに蓄積
-                                # 方針: 初回0.25秒で即送信 + 残りはturn_completeまで一括
-                                # (チャンク分割を最小化し、REST同等の精度を実現)
+                                # REST同等リップシンク: 音声をバッファに蓄積し
+                                # turn_completeで音声+表情をまとめて送信
+                                # （短い応答での A2E 品質を最大化）
+                                self.state.audio_buffer.extend(audio_data)
                                 self.state.a2e_chunk_buffer.extend(audio_data)
                                 self.state.a2e_total_bytes += len(audio_data)
-
-                                A2E_FIRST_CHUNK = 24000 * 2 // 4   # 12,000 bytes = 0.25s
-                                A2E_MAX_BUFFER = 24000 * 2 * 10    # 480,000 bytes = 10s (安全弁)
-
-                                if self.state.a2e_chunk_index == 0:
-                                    # 初回: 0.25秒で即座にリップシンク開始
-                                    if len(self.state.a2e_chunk_buffer) >= A2E_FIRST_CHUNK:
-                                        chunk = bytes(self.state.a2e_chunk_buffer)
-                                        self.state.a2e_chunk_buffer = bytearray()
-                                        self.state.a2e_chunk_index += 1
-                                        asyncio.create_task(
-                                            self._send_expression_chunk(
-                                                client_ws, chunk,
-                                                is_first=True,
-                                                chunk_index=0,
-                                            )
-                                        )
-                                elif len(self.state.a2e_chunk_buffer) >= A2E_MAX_BUFFER:
-                                    # 安全弁: 10秒超の場合のみ分割（通常は到達しない）
-                                    chunk = bytes(self.state.a2e_chunk_buffer)
-                                    self.state.a2e_chunk_buffer = bytearray()
-                                    chunk_index = self.state.a2e_chunk_index
-                                    self.state.a2e_chunk_index += 1
-                                    asyncio.create_task(
-                                        self._send_expression_chunk(
-                                            client_ws, chunk,
-                                            chunk_index=chunk_index,
-                                        )
-                                    )
-                                # else: バッファに溜め続ける（turn_completeで一括処理）
 
                 # --- ターン完了 (stt_stream.py L600-645) ---
                 if hasattr(sc, "turn_complete") and sc.turn_complete:
@@ -456,26 +426,40 @@ class LiveRelay:
                 })
         self.state.ai_transcript_buffer = ""
 
-        # --- A2E → Expression（アバター連携） ---
-        # ターン完了フラグを立て、以降のゼロチャンク送信を防止（P1対応）
+        # --- REST同等リップシンク: 音声+表情を同時送信 ---
         self.state.a2e_turn_complete = True
 
-        # 残りのバッファをフラッシュ（最後のチャンク）
+        # 1. バッファされた音声をクライアントに送信
+        if self.state.audio_buffer:
+            audio_b64 = base64.b64encode(bytes(self.state.audio_buffer)).decode()
+            await self._send_json(client_ws, {
+                "type": "audio",
+                "data": audio_b64,
+            })
+            logger.info(
+                f"[LiveRelay] Buffered audio sent: "
+                f"{len(self.state.audio_buffer)} bytes "
+                f"(~{len(self.state.audio_buffer) // (24000 * 2) * 1000}ms), "
+                f"session={self.session.session_id}"
+            )
+            self.state.audio_buffer = bytearray()
+
+        # 2. 全音声を1回のA2E呼び出しで処理（REST同等: is_start=True, is_final=True）
         if self.a2e_client and len(self.state.a2e_chunk_buffer) > 0:
             chunk = bytes(self.state.a2e_chunk_buffer)
             self.state.a2e_chunk_buffer = bytearray()
 
-            # 短すぎるチャンクは無音でパディング（最低0.25秒 = 12000bytes）
+            # 短すぎる音声は無音でパディング（最低0.25秒 = 12000bytes）
             MIN_CHUNK_BYTES = 24000 * 2 // 4  # 12000 bytes = 0.25s
             if len(chunk) < MIN_CHUNK_BYTES:
                 chunk = chunk + b'\x00' * (MIN_CHUNK_BYTES - len(chunk))
 
-            chunk_index = self.state.a2e_chunk_index
-            self.state.a2e_chunk_index += 1
+            # 単一A2E呼び出し（REST同等の品質）
             await self._send_expression_chunk(
                 client_ws, chunk,
+                is_first=True,
                 is_final=True,
-                chunk_index=chunk_index,
+                chunk_index=0,
             )
         self.state.a2e_total_bytes = 0
 
@@ -488,10 +472,10 @@ class LiveRelay:
         chunk_index: int = 0,
     ) -> None:
         """
-        音声チャンクから expression を生成してクライアントへ送信（ストリーミング対応）
+        音声から expression を生成してクライアントへ送信
 
-        初回0.25sチャンク + 残りturn_complete一括で audio2exp に送信し、
-        結果を即座にクライアントへ転送する。
+        REST同等方式: turn_completeで全音声を1回のA2E呼び出しで処理。
+        is_start=True, is_final=True で完全な音声を送信し、高品質な表情データを取得。
         フロントエンドの queueLiveExpressionFrames() がバッファに追加して再生する。
         """
         # P1対応: turn_complete 後はexpressionを送信しない（ゼロチャンク防止）
