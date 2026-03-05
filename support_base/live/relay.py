@@ -61,6 +61,8 @@ class LiveRelayState:
     # Expression ストリーミング用
     a2e_chunk_buffer: bytearray = field(default_factory=bytearray)
     a2e_total_bytes: int = 0  # ターン内の累計音声バイト数
+    a2e_chunk_index: int = 0  # ターン内のチャンク連番
+    a2e_turn_complete: bool = False  # ターン完了フラグ（ゼロチャンク送信防止）
 
 
 class LiveRelay:
@@ -146,6 +148,8 @@ class LiveRelay:
         self.state.ai_transcript_buffer = ""
         self.state.a2e_chunk_buffer = bytearray()
         self.state.a2e_total_bytes = 0
+        self.state.a2e_chunk_index = 0
+        self.state.a2e_turn_complete = False
 
         async with self._gemini_client.aio.live.connect(
             model=LIVE_API_MODEL,
@@ -286,6 +290,8 @@ class LiveRelay:
                     self.state.ai_transcript_buffer = ""
                     self.state.a2e_chunk_buffer = bytearray()
                     self.state.a2e_total_bytes = 0
+                    self.state.a2e_chunk_index = 0
+                    self.state.a2e_turn_complete = False
                     await self._send_json(client_ws, {"type": "interrupted"})
                     continue
 
@@ -328,20 +334,32 @@ class LiveRelay:
                                 self.state.a2e_chunk_buffer.extend(audio_data)
                                 self.state.a2e_total_bytes += len(audio_data)
 
-                                # 初回チャンクは0.25秒で即発火（口の動き開始を最速に）
-                                # 2回目以降は1.0秒で精度を優先
-                                A2E_FIRST_CHUNK = 24000 * 2 // 4   # 12000 bytes = 0.25s
-                                A2E_NORMAL_CHUNK = 24000 * 2        # 48000 bytes = 1.0s
-                                is_first = self.state.a2e_total_bytes <= A2E_FIRST_CHUNK + A2E_NORMAL_CHUNK
-                                threshold = A2E_FIRST_CHUNK if self.state.a2e_total_bytes <= A2E_FIRST_CHUNK else A2E_NORMAL_CHUNK
+                                # 段階的チャンクサイズ（フロントエンド逆提案を採用）
+                                # chunk#1: 0.25秒（初動を最速に）
+                                # chunk#2: 2.0秒（冒頭品質向上）
+                                # chunk#3〜: 5.0秒（503対策）
+                                A2E_FIRST_CHUNK = 24000 * 2 // 4       # 12,000 bytes = 0.25s
+                                A2E_SECOND_CHUNK = 24000 * 2 * 2       # 96,000 bytes = 2.0s
+                                A2E_NORMAL_CHUNK = 24000 * 2 * 5       # 240,000 bytes = 5.0s
+
+                                idx = self.state.a2e_chunk_index
+                                if idx == 0:
+                                    threshold = A2E_FIRST_CHUNK
+                                elif idx == 1:
+                                    threshold = A2E_SECOND_CHUNK
+                                else:
+                                    threshold = A2E_NORMAL_CHUNK
 
                                 if len(self.state.a2e_chunk_buffer) >= threshold:
                                     chunk = bytes(self.state.a2e_chunk_buffer)
                                     self.state.a2e_chunk_buffer = bytearray()
+                                    chunk_index = self.state.a2e_chunk_index
+                                    self.state.a2e_chunk_index += 1
                                     asyncio.create_task(
                                         self._send_expression_chunk(
                                             client_ws, chunk,
-                                            is_first=is_first,
+                                            is_first=(chunk_index == 0),
+                                            chunk_index=chunk_index,
                                         )
                                     )
 
@@ -394,6 +412,9 @@ class LiveRelay:
         self.state.ai_transcript_buffer = ""
 
         # --- A2E → Expression（アバター連携） ---
+        # ターン完了フラグを立て、以降のゼロチャンク送信を防止（P1対応）
+        self.state.a2e_turn_complete = True
+
         # 残りのバッファをフラッシュ（最後のチャンク）
         if self.a2e_client and len(self.state.a2e_chunk_buffer) > 0:
             chunk = bytes(self.state.a2e_chunk_buffer)
@@ -404,8 +425,12 @@ class LiveRelay:
             if len(chunk) < MIN_CHUNK_BYTES:
                 chunk = chunk + b'\x00' * (MIN_CHUNK_BYTES - len(chunk))
 
+            chunk_index = self.state.a2e_chunk_index
+            self.state.a2e_chunk_index += 1
             await self._send_expression_chunk(
-                client_ws, chunk, is_final=True,
+                client_ws, chunk,
+                is_final=True,
+                chunk_index=chunk_index,
             )
         self.state.a2e_total_bytes = 0
 
@@ -415,19 +440,30 @@ class LiveRelay:
         audio_chunk: bytes,
         is_first: bool = False,
         is_final: bool = False,
+        chunk_index: int = 0,
     ) -> None:
         """
         音声チャンクから expression を生成してクライアントへ送信（ストリーミング対応）
 
-        1秒ごとの音声チャンクを audio2exp に送信し、結果を即座にクライアントへ転送する。
+        段階的チャンクサイズ (0.25s → 2.0s → 5.0s) で audio2exp に送信し、
+        結果を即座にクライアントへ転送する。
         フロントエンドの queueLiveExpressionFrames() がバッファに追加して再生する。
         """
+        # P1対応: turn_complete 後はexpressionを送信しない（ゼロチャンク防止）
+        if self.state.a2e_turn_complete and not is_final:
+            logger.debug(
+                f"[LiveRelay] Skipping A2E chunk after turn_complete: "
+                f"chunk_index={chunk_index}, session={self.session.session_id}"
+            )
+            return
+
         try:
             audio_b64 = base64.b64encode(audio_chunk).decode()
             pcm_duration_ms = len(audio_chunk) // (24000 * 2) * 1000
             logger.info(
                 f"[LiveRelay] A2E chunk: "
                 f"{len(audio_chunk)} bytes (~{pcm_duration_ms}ms), "
+                f"chunk_index={chunk_index}, "
                 f"is_first={is_first}, is_final={is_final}, "
                 f"session={self.session.session_id}"
             )
@@ -440,25 +476,39 @@ class LiveRelay:
                 is_final=is_final,
             )
             if result and result.frames:
+                # P3対応: jawOpen スケーリング（平均0.03→0.08〜0.12を目指す）
+                JAW_OPEN_SCALE = 1.8
+                try:
+                    jaw_idx = result.names.index("jawOpen")
+                    for frame in result.frames:
+                        frame[jaw_idx] = min(frame[jaw_idx] * JAW_OPEN_SCALE, 1.0)
+                except ValueError:
+                    pass  # jawOpen が names に存在しない場合はスキップ
+
                 non_zero = sum(
                     1 for f in result.frames if any(v > 0.001 for v in f)
                 )
+                # P2対応: chunk_index と is_final をメッセージに追加
                 await self._send_json(client_ws, {
                     "type": "expression",
                     "data": {
                         "names": result.names,
                         "frames": result.frames,
                         "frame_rate": result.frame_rate,
+                        "chunk_index": chunk_index,
+                        "is_final": is_final,
                     },
                 })
                 logger.info(
                     f"[LiveRelay] Expression chunk sent: "
                     f"{len(result.frames)} frames "
-                    f"({non_zero} non-zero)"
+                    f"({non_zero} non-zero), "
+                    f"chunk_index={chunk_index}, is_final={is_final}"
                 )
             else:
                 logger.warning(
                     f"[LiveRelay] A2E chunk returned no frames: "
+                    f"chunk_index={chunk_index}, "
                     f"session={self.session.session_id}"
                 )
         except Exception as e:
