@@ -159,6 +159,14 @@ async def _get_expression_frames(
                 sample_rate=sample_rate,
             )
             if result and result.frames:
+                # jawOpen スケーリング（P3対応: 平均0.03→0.08〜0.12）
+                JAW_OPEN_SCALE = 1.8
+                try:
+                    jaw_idx = result.names.index("jawOpen")
+                    for frame in result.frames:
+                        frame[jaw_idx] = min(frame[jaw_idx] * JAW_OPEN_SCALE, 1.0)
+                except ValueError:
+                    pass
                 return {
                     "names": result.names,
                     "frames": result.frames,
