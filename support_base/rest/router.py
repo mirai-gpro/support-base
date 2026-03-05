@@ -337,10 +337,20 @@ async def rest_chat(req: ChatRequest):
 
         if shops and not is_followup:
             original_count = len(shops)
+            original_shops = shops.copy()
             area = extract_area_from_text(req.message, req.language)
 
             # Places API でエンリッチ
-            shops = enrich_shops_with_photos(shops, area, req.language) or []
+            enriched = enrich_shops_with_photos(shops, area, req.language) or []
+            if enriched:
+                shops = enriched
+            else:
+                # enrichment で全店舗が除外された場合、元データをフォールバック
+                logger.warning(
+                    f"[REST] Enrichment filtered ALL {original_count} shops. "
+                    f"Falling back to unvalidated Gemini results"
+                )
+                shops = original_shops
 
             if shops:
                 shop_list = []
