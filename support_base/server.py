@@ -32,6 +32,7 @@ from pydantic import BaseModel
 from support_base.config.settings import HOST, PORT, CORS_ORIGINS, A2E_SERVICE_URL
 from support_base.modes.registry import ModeRegistry
 from support_base.modes.gourmet.plugin import GourmetModePlugin
+from support_base.modes.concierge.plugin import ConciergeModePlugin
 from support_base.services.a2e_client import A2EClient
 from support_base.session.manager import SessionManager
 from support_base.live.relay import LiveRelay
@@ -59,6 +60,7 @@ async def lifespan(app: FastAPI):
 
     # モードプラグイン登録
     mode_registry.register(GourmetModePlugin())
+    mode_registry.register(ConciergeModePlugin())
     logger.info(f"[Server] Modes registered: {mode_registry.list_modes()}")
 
     # A2E クライアント初期化

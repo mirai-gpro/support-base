@@ -50,7 +50,7 @@ steps:
       - '--session-affinity'
       - '--timeout=3600'
       - '--min-instances=1'
-      - '--set-env-vars=PROMPTS_BUCKET_NAME=ai-meet-486502-prompts,SUPABASE_URL=https://bisguyfngvlpcgagrdmr.supabase.co,AUDIO2EXP_SERVICE_URL=https://audio2exp-service-6s2ds5mdba-uc.a.run.app'
+      - '--set-env-vars=PROMPTS_BUCKET_NAME=ai-meet-486502-prompts,SUPABASE_URL=https://bisguyfngvlpcgagrdmr.supabase.co,AUDIO2EXP_SERVICE_URL=https://audio2exp-service-32596857330.us-central1.run.app'
       - '--set-secrets=GEMINI_API_KEY=gemini-api-key:latest,GOOGLE_PLACES_API_KEY=google-places-api-key:latest,HOTPEPPER_API_KEY=hotpepper-api-key:latest,TRIPADVISOR_API_KEY=tripadvisor-api-key:latest,SUPABASE_KEY=supabase-key:latest'
 
 images:
