@@ -456,18 +456,25 @@ export class CoreController {
         this.ws = null;
       }
 
+      const sessionPayload = {
+        mode: this.currentMode,
+        language: this.currentLanguage,
+        dialogue_type: 'live',
+        user_id: this.getUserId()
+      };
+      console.log('[Core] session/start request:', JSON.stringify(sessionPayload));
       const res = await fetch(`${this.apiBase}/api/v2/session/start`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        // BUG2修正: バックエンドは user_id, mode, language, dialogue_type をトップレベルで期待
-        body: JSON.stringify({
-          mode: this.currentMode,
-          language: this.currentLanguage,
-          dialogue_type: 'live',
-          user_id: this.getUserId()
-        })
+        body: JSON.stringify(sessionPayload)
       });
+      if (!res.ok) {
+        const errBody = await res.text();
+        console.error(`[Core] session/start failed: ${res.status} ${res.statusText}`, errBody);
+        throw new Error(`session/start failed: ${res.status}`);
+      }
       const data = await res.json();
+      console.log('[Core] session/start response:', JSON.stringify({ session_id: data.session_id, mode: data.mode, ws_url: data.ws_url }));
       this.sessionId = data.session_id;
 
       // ★ WebSocket接続（session_id取得後）
