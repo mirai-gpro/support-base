@@ -155,6 +155,53 @@ protected async sendMessage() {
 
 ---
 
+### BUG5 (重要): 挨拶音声がブラウザ自動再生ポリシーでブロックされる
+
+**ファイル**: `core-controller.ts` の `bindEvents()` + `speakTextGCP()`
+**症状**: ページ読み込み後、挨拶音声が無音。`isUserInteracted=false` のまま
+
+**原因**: ブラウザの自動再生ポリシーにより、ユーザーがページを操作（クリック/タッチ/キー入力）
+するまで音声再生が許可されない。`enableAudioPlayback()` がマイク/スピーカーボタンのクリック時
+にしか呼ばれないため、テキスト入力フィールドをクリックしても音声は有効化されない。
+
+**修正**:
+1. `bindEvents()` で document レベルの click/touchstart/keydown リスナーを追加
+2. 初回操作時に `enableAudioPlayback()` を呼び出し
+3. 挨拶音声を `_pendingGreetingAudio` に保留し、初回操作時に再生
+
+---
+
+### BUG6 (重大): Live API 音声入力の二重処理
+
+**ファイル**: `core-controller.ts`, `concierge-controller.ts` の `handleStreamingSTTComplete()`
+**症状**: 音声入力後、Geminiが2回応答を生成 → 1回目の音声が2回目で上書きされる
+
+**原因**: Live API では音声チャンクがリアルタイムで Gemini に送信され、Gemini の VAD
+(Voice Activity Detection) がユーザーの喋り終わりを自動検知して応答を生成する。
+しかし `handleStreamingSTTComplete()` がユーザーの発言テキストを `sendMessage()` 経由で
+再送信していたため、Gemini が同じ内容を2回処理していた。
+
+```
+❌ 修正前:
+音声→Gemini→応答① → transcription到着 → sendMessage(テキスト再送信) → Gemini→応答②
+→ 応答①の音声が応答②で上書きされる
+
+✅ 修正後:
+音声→Gemini→応答① → transcription到着 → 表示のみ（再送信しない）
+→ 応答①のaudio/expressionをそのまま再生
+```
+
+---
+
+### BUG7 (軽微): audio到着時にマイクが停止されない
+
+**ファイル**: `concierge-controller.ts` の `handleWsMessage()` case 'audio'
+**症状**: AI音声再生中にマイクが録音したままでエコー/ハウリングの可能性
+
+**修正**: `audio` メッセージ受信時に `if (this.isRecording) this.stopStreamingSTT()` を追加
+
+---
+
 ## 適用方法
 
 `frontend-fixes/src/scripts/chat/` 内の **2ファイル** で、
