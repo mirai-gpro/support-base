@@ -129,12 +129,18 @@ const greetingText = data.greeting || this.t('initialGreetingConcierge');
 
 ## 適用方法
 
-`frontend-fixes/src/scripts/chat/` 内の3ファイルで、
+`frontend-fixes/src/scripts/chat/` 内の **2ファイル** で、
 `gourmet-sp2` の `src/scripts/chat/` 内の同名ファイルを**上書き**してください。
+
+**⚠️ `audio-manager.ts` は変更対象外です。絶対に上書きしないでください。**
+iPhone 16/17 のマイク・音声制御に関するセキュリティ対策が微妙なバランスで成立しており、
+変更すると iOS での音声入力が壊れる可能性があります。
 
 ```bash
 # gourmet-sp2 リポジトリのルートで:
-cp -v frontend-fixes/src/scripts/chat/*.ts src/scripts/chat/
+cp -v frontend-fixes/src/scripts/chat/core-controller.ts src/scripts/chat/
+cp -v frontend-fixes/src/scripts/chat/concierge-controller.ts src/scripts/chat/
+# ★ audio-manager.ts はコピーしない！
 npm run build
 ```
 
