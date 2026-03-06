@@ -1,12 +1,11 @@
 """
-グルメコンシェルジュ モードプラグイン
+グルメモード プラグイン
 
-GCS/ローカルから読み込んだプロンプトを使用。
+support_system_{lang}.txt プロンプトを使用。
 Live API / REST 両方の経路で使用。
 
 プロンプトソース:
-  - GCS: gs://{PROMPTS_BUCKET_NAME}/prompts/concierge_{lang}.txt
-  - ローカル: prompts/concierge_{lang}.txt
+  - ローカル: prompts/support_system_{lang}.txt
   - フォールバック: ハードコードされた最小プロンプト
 """
 
@@ -51,28 +50,25 @@ class GourmetModePlugin(BaseModePlugin):
         Live API 用システムプロンプト。
 
         優先順位:
-          1. ローカル prompts/concierge_{lang}.txt (常に最新を直接読み込み)
+          1. ローカル prompts/support_system_{lang}.txt
           2. ハードコードのフォールバック
-        ※ GCS プロンプトは REST 用 (support_system_ja.txt) と異なり、
-          Live API 用は短く厳格な concierge プロンプトが必要。
-          GCS の concierge プロンプトが古い可能性があるため、ローカルを優先する。
         """
         prompt = ""
         source = "none"
 
         # ローカルファイルを直接読み込み (GCS より優先)
         import os
-        concierge_file = os.path.join(
-            os.path.dirname(__file__), "..", "..", "..", "prompts", f"concierge_{language}.txt"
+        prompt_file = os.path.join(
+            os.path.dirname(__file__), "..", "..", "..", "prompts", f"support_system_{language}.txt"
         )
-        concierge_file = os.path.normpath(concierge_file)
+        prompt_file = os.path.normpath(prompt_file)
         try:
-            with open(concierge_file, "r", encoding="utf-8") as f:
+            with open(prompt_file, "r", encoding="utf-8") as f:
                 prompt = f.read().strip()
             if prompt and not prompt.startswith("エラー:"):
-                source = f"local:{concierge_file}"
+                source = f"local:{prompt_file}"
         except FileNotFoundError:
-            logger.warning(f"[GourmetPlugin] ローカルプロンプト未発見: {concierge_file}")
+            logger.warning(f"[GourmetPlugin] ローカルプロンプト未発見: {prompt_file}")
         except Exception as e:
             logger.warning(f"[GourmetPlugin] ローカルプロンプト読み込み失敗: {e}")
 
