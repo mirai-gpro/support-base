@@ -202,20 +202,41 @@ protected async sendMessage() {
 
 ---
 
+### アーキテクチャ改善: audio-manager.ts 全面書き直し
+
+**ファイル**: `audio-manager.ts`（新規作成 — 旧ファイルを**上書き**）
+**設計書**: `docs/gemini-live-api-audio-architecture.md`
+
+Gemini Live API の推奨パターンに基づき、以下の問題を根本解決:
+
+1. **AudioContext/MediaStream/AudioWorkletNode の毎回破棄・再作成**
+   → **シングルトン維持** + フラグ制御（`canSendAudio`）に変更
+   → マイク開始が初回1-3秒 → 2回目以降 ~10ms に高速化
+
+2. **iOS 受話口問題**（getUserMedia 中に HTMLAudioElement が earpiece ルーティング）
+   → 全音声再生を **Web Audio API** (`AudioBufferSourceNode`) に統一
+   → 入力/出力が同一 AudioContext 内で完結し、スピーカーから出力
+
+3. **クライアントVAD とサーバーVAD の競合**
+   → ターン検知は Gemini サーバー側 VAD に委任
+   → クライアント側 VAD はレガシー録音モードのみ使用
+
+4. **40秒初期化遅延**
+   → ack TTS プリジェネレーションを fire-and-forget 化
+   → UI（マイク/入力）はセッション開始直後に有効化
+
+---
+
 ## 適用方法
 
-`frontend-fixes/src/scripts/chat/` 内の **2ファイル** で、
+`frontend-fixes/src/scripts/chat/` 内の **3ファイル** で、
 `gourmet-sp2` の `src/scripts/chat/` 内の同名ファイルを**上書き**してください。
-
-**⚠️ `audio-manager.ts` は変更対象外です。絶対に上書きしないでください。**
-iPhone 16/17 のマイク・音声制御に関するセキュリティ対策が微妙なバランスで成立しており、
-変更すると iOS での音声入力が壊れる可能性があります。
 
 ```bash
 # gourmet-sp2 リポジトリのルートで:
+cp -v frontend-fixes/src/scripts/chat/audio-manager.ts src/scripts/chat/
 cp -v frontend-fixes/src/scripts/chat/core-controller.ts src/scripts/chat/
 cp -v frontend-fixes/src/scripts/chat/concierge-controller.ts src/scripts/chat/
-# ★ audio-manager.ts はコピーしない！
 npm run build
 ```
 
@@ -234,11 +255,12 @@ grep -rn 'fallbackResponse' src/scripts/chat/core-controller.ts  # → generateF
 以下のログが表示されることを確認:
 
 1. **音声受信**: `[Concierge] WS audio received: XXXXX chars` — 値が0でないこと
-2. **音声再生**: `[Concierge] PCM audio play() started successfully` — 表示されること
+2. **音声再生**: `[Concierge] PCM audio play() completed` — 表示されること
 3. **音声スキップなし**: `[Concierge] PCM audio SKIPPED` が表示されないこと（表示される場合は `isUserInteracted` の問題）
 4. **リップシンク**: `[Concierge] Expression sync: N frames queued` — Nが0でないこと
 5. **同期再生**: `[Concierge] Both audio+expression ready, starting synced playback` — 表示されること
 6. **挨拶TTS**: `[Concierge] speakTextGCP: audio=XXXXX chars` — 値が0でないこと
+7. **マイク制御**: `[AudioManager] Streaming started (flag ON)` / `Streaming stopped (flag OFF)` — フラグ制御で即時切替
 
 ### その他の確認
 
