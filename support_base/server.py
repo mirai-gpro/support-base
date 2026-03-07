@@ -36,7 +36,7 @@ from support_base.modes.concierge.plugin import ConciergeModePlugin
 from support_base.services.a2e_client import A2EClient
 from support_base.session.manager import SessionManager
 from support_base.live.relay import LiveRelay
-from support_base.rest.router import router as rest_router, set_a2e_client
+from support_base.rest.router import router as rest_router, set_a2e_client, precache_greetings
 from support_base.core.support_core import gemini_client
 
 logger = logging.getLogger(__name__)
@@ -76,6 +76,12 @@ async def lifespan(app: FastAPI):
     else:
         logger.info(f"[Server] A2E service not configured (A2E_SERVICE_URL='{A2E_SERVICE_URL}')")
         set_a2e_client(None)
+
+    # 挨拶TTS音声をプリキャッシュ（起動時に生成して初回リクエストを高速化）
+    try:
+        await precache_greetings()
+    except Exception as e:
+        logger.warning(f"[Server] Greeting precache failed: {e}")
 
     logger.info(f"[Server] Platform ready on {HOST}:{PORT}")
 

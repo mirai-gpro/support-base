@@ -515,26 +515,25 @@ export class CoreController {
       this.els.speakerBtn.classList.remove('disabled');
       this.els.reservationBtn.classList.remove('visible');
 
-      // ★ ack プリジェネレーションは fire-and-forget（awaitしない）
-      const ackPreGen = ackTexts.map(async (text) => {
-        try {
-          const ackResponse = await fetch(`${this.apiBase}/api/v2/rest/tts/synthesize`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              text: text, language_code: langConfig.tts, voice_name: langConfig.voice
-            })
-          });
-          const ackData = await ackResponse.json();
-          if (ackData.success && ackData.audio) {
-            this.preGeneratedAcks.set(text, ackData.audio);
-          }
-        } catch (_e) { }
-      });
-      Promise.all(ackPreGen).catch(() => {});
-
-      // ★ 挨拶TTS（非ブロッキング — UIは既に有効）
-      this.speakTextGCP(this.t('initialGreeting')).catch(() => {});
+      // ★ 挨拶TTS優先 → 完了後にackプリジェネレーション（帯域競合を回避）
+      this.speakTextGCP(this.t('initialGreeting')).then(() => {
+        const ackPreGen = ackTexts.map(async (text) => {
+          try {
+            const ackResponse = await fetch(`${this.apiBase}/api/v2/rest/tts/synthesize`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                text: text, language_code: langConfig.tts, voice_name: langConfig.voice
+              })
+            });
+            const ackData = await ackResponse.json();
+            if (ackData.success && ackData.audio) {
+              this.preGeneratedAcks.set(text, ackData.audio);
+            }
+          } catch (_e) { }
+        });
+        Promise.all(ackPreGen).catch(() => {});
+      }).catch(() => {});
 
     } catch (e) {
       console.error('[Session] Initialization error:', e);

@@ -79,6 +79,54 @@ def set_a2e_client(client) -> None:
         logger.info("[REST] A2E client not available")
 
 
+async def precache_greetings() -> None:
+    """サーバー起動時に全挨拶文のTTS音声をプリキャッシュ"""
+    if not TTS_STT_ENABLED:
+        logger.warning("[TTS] Precache skipped: TTS not available")
+        return
+
+    # 主要言語・ボイスの組み合わせ
+    lang_voice_map = {
+        'ja': ('ja-JP', 'ja-JP-Chirp3-HD-Leda'),
+        'en': ('en-US', 'en-US-Studio-O'),
+    }
+
+    cached_count = 0
+    for mode, greetings in INITIAL_GREETINGS.items():
+        for lang, text in greetings.items():
+            if lang not in lang_voice_map:
+                continue
+            lang_code, voice_name = lang_voice_map[lang]
+            cache_key = (text.strip(), voice_name)
+            if cache_key in _greeting_cache:
+                continue
+
+            try:
+                synthesis_input = texttospeech.SynthesisInput(text=text)
+                voice = texttospeech.VoiceSelectionParams(
+                    language_code=lang_code, name=voice_name
+                )
+                audio_config = texttospeech.AudioConfig(
+                    audio_encoding=texttospeech.AudioEncoding.MP3,
+                )
+                response = tts_client.synthesize_speech(
+                    input=synthesis_input, voice=voice, audio_config=audio_config
+                )
+                audio_base64 = base64.b64encode(response.audio_content).decode("utf-8")
+                result = {
+                    "success": True,
+                    "audio": audio_base64,
+                    "expression_status": "skipped",
+                }
+                _greeting_cache[cache_key] = result
+                cached_count += 1
+                logger.info(f"[TTS] Precached greeting: mode={mode}, lang={lang}")
+            except Exception as e:
+                logger.warning(f"[TTS] Precache failed: mode={mode}, lang={lang}, error={e}")
+
+    logger.info(f"[TTS] Greeting precache complete: {cached_count} entries")
+
+
 # === Pydantic モデル ===
 
 class RestSessionStartRequest(BaseModel):
@@ -523,42 +571,47 @@ async def rest_tts_synthesize(req: TTSRequest):
             pitch=req.pitch,
         )
 
-        response = tts_client.synthesize_speech(
-            input=synthesis_input, voice=voice, audio_config=audio_config
-        )
-
-        audio_base64 = base64.b64encode(response.audio_content).decode("utf-8")
-
         # Audio2Expression
         expression_data = None
         expression_status = "skipped"  # skipped / ok / error / not_configured
 
-        if not req.session_id:
-            expression_status = "skipped"
-            logger.info("[Audio2Exp] Skipped: no session_id")
-        elif not _a2e_client and not A2E_SERVICE_URL:
-            expression_status = "not_configured"
-            logger.info("[Audio2Exp] Not configured: A2E_SERVICE_URL not set")
-        else:
-            try:
-                # LINEAR16 (PCM) を A2E 用に生成（MP3より処理が安定）
-                a2e_audio_config = texttospeech.AudioConfig(
-                    audio_encoding=texttospeech.AudioEncoding.LINEAR16,
-                    sample_rate_hertz=24000,
-                    speaking_rate=req.speaking_rate,
-                    pitch=req.pitch,
-                )
-                a2e_response = tts_client.synthesize_speech(
-                    input=synthesis_input, voice=voice, audio_config=a2e_audio_config
-                )
-                a2e_audio_b64 = base64.b64encode(a2e_response.audio_content).decode("utf-8")
-                logger.info(
-                    f"[Audio2Exp] Calling A2E with PCM: "
-                    f"client={'shared' if _a2e_client else 'fallback'}, "
-                    f"audio_size={len(a2e_audio_b64) * 3 // 4 // 1024}KB, "
-                    f"session={req.session_id}"
-                )
+        need_a2e = bool(req.session_id) and bool(_a2e_client or A2E_SERVICE_URL)
 
+        if need_a2e:
+            # ★ MP3 TTS と A2E用 PCM TTS を並列実行
+            import asyncio
+            loop = asyncio.get_event_loop()
+
+            a2e_audio_config = texttospeech.AudioConfig(
+                audio_encoding=texttospeech.AudioEncoding.LINEAR16,
+                sample_rate_hertz=24000,
+                speaking_rate=req.speaking_rate,
+                pitch=req.pitch,
+            )
+
+            mp3_future = loop.run_in_executor(
+                None,
+                lambda: tts_client.synthesize_speech(
+                    input=synthesis_input, voice=voice, audio_config=audio_config
+                ),
+            )
+            pcm_future = loop.run_in_executor(
+                None,
+                lambda: tts_client.synthesize_speech(
+                    input=synthesis_input, voice=voice, audio_config=a2e_audio_config
+                ),
+            )
+            response, a2e_response = await asyncio.gather(mp3_future, pcm_future)
+
+            a2e_audio_b64 = base64.b64encode(a2e_response.audio_content).decode("utf-8")
+            logger.info(
+                f"[Audio2Exp] Calling A2E with PCM (parallel): "
+                f"client={'shared' if _a2e_client else 'fallback'}, "
+                f"audio_size={len(a2e_audio_b64) * 3 // 4 // 1024}KB, "
+                f"session={req.session_id}"
+            )
+
+            try:
                 # リトライ付き A2E 呼び出し（最大2回）
                 for attempt in range(2):
                     expression_data = await _get_expression_frames(
@@ -571,7 +624,6 @@ async def rest_tts_synthesize(req: TTSRequest):
                             f"[Audio2Exp] Retry A2E: attempt 1 failed, "
                             f"session={req.session_id}"
                         )
-                        import asyncio
                         await asyncio.sleep(0.5)
 
                 expression_status = "ok" if expression_data else "error"
@@ -589,6 +641,15 @@ async def rest_tts_synthesize(req: TTSRequest):
             except Exception as e:
                 expression_status = "error"
                 logger.warning(f"[Audio2Exp] Error: {e}", exc_info=True)
+        else:
+            response = tts_client.synthesize_speech(
+                input=synthesis_input, voice=voice, audio_config=audio_config
+            )
+            if not req.session_id:
+                logger.info("[Audio2Exp] Skipped: no session_id")
+            else:
+                expression_status = "not_configured"
+                logger.info("[Audio2Exp] Not configured: A2E_SERVICE_URL not set")
 
         result = {"success": True, "audio": audio_base64, "expression_status": expression_status}
         if expression_data:

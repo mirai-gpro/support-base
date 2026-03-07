@@ -128,27 +128,27 @@ export class ConciergeController extends CoreController {
       this.els.speakerBtn.classList.remove('disabled');
       this.els.reservationBtn.classList.remove('visible');
 
-      // ★ ack プリジェネレーションは fire-and-forget（awaitしない）
-      const ackPreGen = ackTexts.map(async (text) => {
-        try {
-          const ackResponse = await fetch(`${this.apiBase}/api/v2/rest/tts/synthesize`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              text: text, language_code: langConfig.tts, voice_name: langConfig.voice,
-              session_id: this.sessionId
-            })
-          });
-          const ackData = await ackResponse.json();
-          if (ackData.success && ackData.audio) {
-            this.preGeneratedAcks.set(text, ackData.audio);
-          }
-        } catch (_e) { }
-      });
-      Promise.all(ackPreGen).catch(() => {});
-
-      // ★ 挨拶TTS（非ブロッキング — UIは既に有効）
-      this.speakTextGCP(greetingText).catch(() => {});
+      // ★ 挨拶TTS優先 → 完了後にackプリジェネレーション（帯域競合を回避）
+      this.speakTextGCP(greetingText).then(() => {
+        // 挨拶再生完了後にackプリジェネレーションを開始
+        const ackPreGen = ackTexts.map(async (text) => {
+          try {
+            const ackResponse = await fetch(`${this.apiBase}/api/v2/rest/tts/synthesize`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                text: text, language_code: langConfig.tts, voice_name: langConfig.voice,
+                session_id: this.sessionId
+              })
+            });
+            const ackData = await ackResponse.json();
+            if (ackData.success && ackData.audio) {
+              this.preGeneratedAcks.set(text, ackData.audio);
+            }
+          } catch (_e) { }
+        });
+        Promise.all(ackPreGen).catch(() => {});
+      }).catch(() => {});
 
     } catch (e) {
       console.error('[Session] Initialization error:', e);
