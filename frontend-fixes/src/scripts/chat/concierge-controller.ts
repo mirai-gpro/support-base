@@ -128,9 +128,13 @@ export class ConciergeController extends CoreController {
       this.els.speakerBtn.classList.remove('disabled');
       this.els.reservationBtn.classList.remove('visible');
 
-      // ★ 挨拶TTS優先 → 完了後にackプリジェネレーション（帯域競合を回避）
-      this.speakTextGCP(greetingText).then(() => {
-        // 挨拶再生完了後にackプリジェネレーションを開始
+      // ★ 挨拶音声: session/start レスポンスに同梱されていれば即再生（TTS不要）
+      const playGreeting = data.greeting_audio
+        ? this.playGreetingAudioDirect(data.greeting_audio)
+        : this.speakTextGCP(greetingText);
+
+      playGreeting.then(() => {
+        // 挨拶再生完了後にackプリジェネレーションを開始（帯域競合を回避）
         const ackPreGen = ackTexts.map(async (text) => {
           try {
             const ackResponse = await fetch(`${this.apiBase}/api/v2/rest/tts/synthesize`, {

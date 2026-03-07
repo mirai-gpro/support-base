@@ -127,6 +127,15 @@ async def precache_greetings() -> None:
     logger.info(f"[TTS] Greeting precache complete: {cached_count} entries")
 
 
+def get_greeting_audio(text: str, voice_name: str = "ja-JP-Chirp3-HD-Leda") -> str | None:
+    """プリキャッシュ済み挨拶音声を取得（base64 MP3）"""
+    cache_key = (text.strip(), voice_name)
+    cached = _greeting_cache.get(cache_key)
+    if cached and cached.get("audio"):
+        return cached["audio"]
+    return None
+
+
 # === Pydantic モデル ===
 
 class RestSessionStartRequest(BaseModel):

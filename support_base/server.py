@@ -36,7 +36,7 @@ from support_base.modes.concierge.plugin import ConciergeModePlugin
 from support_base.services.a2e_client import A2EClient
 from support_base.session.manager import SessionManager
 from support_base.live.relay import LiveRelay
-from support_base.rest.router import router as rest_router, set_a2e_client, precache_greetings
+from support_base.rest.router import router as rest_router, set_a2e_client, precache_greetings, get_greeting_audio
 from support_base.core.support_core import gemini_client
 
 logger = logging.getLogger(__name__)
@@ -126,6 +126,7 @@ class SessionStartResponse(BaseModel):
     language: str
     dialogue_type: str
     greeting: str
+    greeting_audio: str | None = None  # base64 MP3（プリキャッシュ済みの場合）
     ws_url: str
 
 
@@ -179,12 +180,21 @@ async def start_session(req: SessionStartRequest):
     # 初回挨拶
     greeting = plugin.get_initial_greeting(language=req.language)
 
+    # プリキャッシュ済み挨拶音声を取得（追加TTSリクエスト不要にする）
+    lang_voice_map = {
+        'ja': 'ja-JP-Chirp3-HD-Leda',
+        'en': 'en-US-Studio-O',
+    }
+    voice_name = lang_voice_map.get(req.language)
+    greeting_audio = get_greeting_audio(greeting, voice_name) if voice_name else None
+
     return SessionStartResponse(
         session_id=session.session_id,
         mode=req.mode,
         language=req.language,
         dialogue_type=dialogue_type,
         greeting=greeting,
+        greeting_audio=greeting_audio,
         ws_url=f"/api/v2/live/{session.session_id}",
     )
 
