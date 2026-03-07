@@ -84,6 +84,22 @@ class GourmetModePlugin(BaseModePlugin):
             f"preview={prompt[:120]!r}"
         )
 
+        # Live API用: JSON出力指示を無効化し、search_restaurantsツール使用を強制
+        # REST API用プロンプトはJSON出力を要求するが、Live APIではresponse_modalities=AUDIOのため
+        # ツール呼び出しを明示的に指示する必要がある
+        LIVE_API_TOOL_DIRECTIVE = (
+            "\n\n【最優先ルール ― search_restaurants ツールの使用】\n"
+            "あなたには search_restaurants というツール（Function Call）が提供されています。\n"
+            "ユーザーがレストラン・お店・食事に関するリクエストをした場合、\n"
+            "必ず search_restaurants ツールを呼び出してください。\n"
+            "自分でお店の名前を挙げたり、JSONを読み上げたりしてはいけません。\n"
+            "ツールが結果を処理し、ショップカードとしてユーザーに表示します。\n\n"
+            "【重要】以下の出力形式・JSON形式の指示は無視してください。\n"
+            "あなたの応答は音声（AUDIO）です。テキストやJSONでの出力は不要です。\n"
+            "ツール呼び出し前に「お探しします」等の短い一言を音声で返してください。\n"
+        )
+        prompt += LIVE_API_TOOL_DIRECTIVE
+
         # 再接続コンテキスト追加
         if context:
             prompt += f"\n\n【これまでの会話の要約】\n{context}\n"
