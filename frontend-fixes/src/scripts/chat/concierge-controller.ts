@@ -81,18 +81,25 @@ export class ConciergeController extends CoreController {
       // ★ user_id を取得（親クラスのメソッドを使用）
       const userId = this.getUserId();
 
+      const sessionPayload = {
+        mode: 'concierge',
+        language: this.currentLanguage,
+        dialogue_type: 'live',
+        user_id: userId
+      };
+      console.log('[Concierge] session/start request:', JSON.stringify(sessionPayload));
       const res = await fetch(`${this.apiBase}/api/v2/session/start`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        // BUG2修正: バックエンドは user_id, mode, language, dialogue_type をトップレベルで期待
-        body: JSON.stringify({
-          mode: 'concierge',
-          language: this.currentLanguage,
-          dialogue_type: 'live',
-          user_id: userId
-        })
+        body: JSON.stringify(sessionPayload)
       });
+      if (!res.ok) {
+        const errBody = await res.text();
+        console.error(`[Concierge] session/start failed: ${res.status} ${res.statusText}`, errBody);
+        throw new Error(`session/start failed: ${res.status}`);
+      }
       const data = await res.json();
+      console.log('[Concierge] session/start response:', JSON.stringify({ session_id: data.session_id, mode: data.mode, ws_url: data.ws_url }));
       this.sessionId = data.session_id;
 
       // ★ WebSocket接続（session_id取得後）
@@ -121,27 +128,31 @@ export class ConciergeController extends CoreController {
       this.els.speakerBtn.classList.remove('disabled');
       this.els.reservationBtn.classList.remove('visible');
 
-      // ★ ack プリジェネレーションは fire-and-forget（awaitしない）
-      const ackPreGen = ackTexts.map(async (text) => {
-        try {
-          const ackResponse = await fetch(`${this.apiBase}/api/v2/rest/tts/synthesize`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              text: text, language_code: langConfig.tts, voice_name: langConfig.voice,
-              session_id: this.sessionId
-            })
-          });
-          const ackData = await ackResponse.json();
-          if (ackData.success && ackData.audio) {
-            this.preGeneratedAcks.set(text, ackData.audio);
-          }
-        } catch (_e) { }
-      });
-      Promise.all(ackPreGen).catch(() => {});
+      // ★ 挨拶音声: session/start レスポンスに同梱されていれば即再生（TTS不要）
+      const playGreeting = data.greeting_audio
+        ? this.playGreetingAudioDirect(data.greeting_audio)
+        : this.speakTextGCP(greetingText);
 
-      // ★ 挨拶TTS（非ブロッキング — UIは既に有効）
-      this.speakTextGCP(greetingText).catch(() => {});
+      playGreeting.then(() => {
+        // 挨拶再生完了後にackプリジェネレーションを開始（帯域競合を回避）
+        const ackPreGen = ackTexts.map(async (text) => {
+          try {
+            const ackResponse = await fetch(`${this.apiBase}/api/v2/rest/tts/synthesize`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                text: text, language_code: langConfig.tts, voice_name: langConfig.voice,
+                session_id: this.sessionId
+              })
+            });
+            const ackData = await ackResponse.json();
+            if (ackData.success && ackData.audio) {
+              this.preGeneratedAcks.set(text, ackData.audio);
+            }
+          } catch (_e) { }
+        });
+        Promise.all(ackPreGen).catch(() => {});
+      }).catch(() => {});
 
     } catch (e) {
       console.error('[Session] Initialization error:', e);
