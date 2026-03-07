@@ -17,7 +17,7 @@ RECEIVE_SAMPLE_RATE = 24000  # Live API 出力 (PCM 24kHz)
 
 # Live API 再接続設定 (stt_stream.py L372-373 から移植)
 MAX_AI_CHARS_BEFORE_RECONNECT = 800
-LONG_SPEECH_THRESHOLD = 500
+LONG_SPEECH_THRESHOLD = 80  # stt_stream.py と同値 (80文字超えで再接続判定)
 RECONNECT_DELAY_SECONDS = 3
 
 # audio2exp-service (AUDIO2EXP_SERVICE_URL も互換性のため受け付ける)

@@ -339,13 +339,15 @@ class LiveRelay:
                 if self.reconnect_mgr.needs_reconnect:
                     return
 
+                # --- Function Calling ハンドリング（server_content の有無に関わらず先にチェック）---
+                if hasattr(response, 'tool_call') and response.tool_call:
+                    await self._handle_tool_call(
+                        response.tool_call, gemini_session, client_ws
+                    )
+                    continue
+
                 sc = response.server_content
                 if not sc:
-                    # --- Function Calling ハンドリング ---
-                    if hasattr(response, 'tool_call') and response.tool_call:
-                        await self._handle_tool_call(
-                            response.tool_call, gemini_session, client_ws
-                        )
                     continue
 
                 # --- 割り込み検知 (stt_stream.py L650-662) ---
