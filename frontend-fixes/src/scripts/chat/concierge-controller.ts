@@ -128,13 +128,12 @@ export class ConciergeController extends CoreController {
       this.els.speakerBtn.classList.remove('disabled');
       this.els.reservationBtn.classList.remove('visible');
 
-      // ★ 挨拶音声: session/start レスポンスに同梱されていれば即再生（TTS不要）
-      const playGreeting = data.greeting_audio
-        ? this.playGreetingAudioDirect(data.greeting_audio)
-        : this.speakTextGCP(greetingText);
+      // ★ 挨拶音声: Gemini Live API が WebSocket 経由で PCM 音声を送信
+      // TTS API 不要 — relay.py が Gemini に挨拶テキストを送信済み
+      // 音声は handleWsMessage() の case 'audio' で受信・再生される
 
-      playGreeting.then(() => {
-        // 挨拶再生完了後にackプリジェネレーションを開始（帯域競合を回避）
+      // ack プリジェネレーション（バックグラウンドで非同期実行）
+      {
         const ackPreGen = ackTexts.map(async (text) => {
           try {
             const ackResponse = await fetch(`${this.apiBase}/api/v2/rest/tts/synthesize`, {
@@ -152,7 +151,7 @@ export class ConciergeController extends CoreController {
           } catch (_e) { }
         });
         Promise.all(ackPreGen).catch(() => {});
-      }).catch(() => {});
+      }
 
     } catch (e) {
       console.error('[Session] Initialization error:', e);

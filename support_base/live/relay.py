@@ -214,6 +214,30 @@ class LiveRelay:
                     "type": "reconnected",
                     "session_count": self.reconnect_mgr.session_count,
                 })
+            else:
+                # 初回接続: 挨拶テキストを Gemini に送信 → Gemini が音声で読み上げ
+                # （Google Cloud TTS ではなく Gemini Live API のネイティブ音声を使用）
+                greeting = self.mode_plugin.get_initial_greeting(
+                    language=self.session.language
+                )
+                try:
+                    await gemini_session.send_client_content(
+                        turns=types.Content(
+                            role="user",
+                            parts=[types.Part(
+                                text=f"次の挨拶文を自然に読み上げてください: {greeting}"
+                            )],
+                        ),
+                        turn_complete=True,
+                    )
+                    logger.info(
+                        f"[LiveRelay] Greeting sent to Gemini: "
+                        f"{greeting[:50]!r}"
+                    )
+                except Exception as e:
+                    logger.warning(
+                        f"[LiveRelay] Greeting send failed: {e}"
+                    )
 
             # 3つの非同期タスクを並行実行 (stt_stream.py L926-930)
             try:
