@@ -885,6 +885,16 @@ class LiveRelay:
             context=context,
         )
 
+        # --- ハードコード: 応答スタイル制御 (A2Eレイテンシ最適化) ---
+        # ※ GCSプロンプトとは独立。チューニング時はここを直接編集。
+        RESPONSE_STYLE_DIRECTIVE = (
+            "\n\n【応答スタイル — 最優先で厳守】\n"
+            "・1ターンの返しは出来るだけ短く、端的に。目安30文字以内。\n"
+            "・1ターンでのユーザーへの質問は2つ以内。\n"
+            "・文節を途中で切らない。自然な区切りで完結させる。\n"
+        )
+        system_instruction += RESPONSE_STYLE_DIRECTIVE
+
         logger.info(
             f"[LiveRelay] system_instruction: len={len(system_instruction)}, "
             f"preview={system_instruction[:150]!r}"
