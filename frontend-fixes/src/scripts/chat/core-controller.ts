@@ -34,8 +34,8 @@ export class CoreController {
   protected isIOS = /iPhone|iPad|iPod/i.test(navigator.userAgent);
   protected isAndroid = /Android/i.test(navigator.userAgent);
 
-  // ★ 挨拶音声の遅延再生用（isUserInteracted=false時にバッファ — raw base64）
-  protected _pendingGreetingAudio: string | null = null;
+  // ★ 挨拶音声の遅延再生用（isUserInteracted=false時にPCMチャンクをバッファ）
+  protected _pendingPcmChunks: string[] = [];
 
   protected els: any = {};
   protected ttsPlayer: HTMLAudioElement; // LAM avatar 連携用に維持
@@ -198,11 +198,13 @@ export class CoreController {
       if (!this.isUserInteracted) {
         console.log('[Core] Auto-enabling audio on first user interaction');
         this.enableAudioPlayback();
-        // 挨拶音声が保留中の場合は Web Audio API で再生
-        if (this._pendingGreetingAudio) {
-          console.log('[Core] Playing deferred greeting audio via Web Audio API');
-          this.audioManager.playMp3Audio(this._pendingGreetingAudio).catch(() => {});
-          this._pendingGreetingAudio = null;
+        // 挨拶PCM音声が保留中の場合は Web Audio API で再生
+        if (this._pendingPcmChunks.length > 0) {
+          console.log(`[Core] Playing ${this._pendingPcmChunks.length} deferred PCM chunks`);
+          for (const chunk of this._pendingPcmChunks) {
+            this.audioManager.playPcmAudio(chunk).catch(() => {});
+          }
+          this._pendingPcmChunks = [];
         }
       }
     };
@@ -225,6 +227,17 @@ export class CoreController {
           console.log('[Foreground] Long background duration - triggering soft reset...');
           await this.resetAppContent();
           return;
+        }
+
+        // ★ v2: AudioContext の復帰 + 再生キューリセット
+        // iOS Safari ではバックグラウンドから戻ると AudioContext が suspended/interrupted になる
+        try {
+          this.audioManager.stopAll();
+          await this.audioManager.resumeAudioContext();
+          console.log('[Foreground] AudioContext resumed successfully');
+        } catch (e) {
+          console.warn('[Foreground] AudioContext resume failed, full reset...', e);
+          this.audioManager.fullResetAudioResources();
         }
 
         // 1. WebSocket再接続（切断されていた場合）
@@ -335,7 +348,9 @@ export class CoreController {
         this.resetInputState();
         break;
       case 'audio':
-        // AI音声（PCM 24kHz base64）→ Web Audio API で再生
+        // ★ v2: AI音声（PCM 24kHz base64）→ キュー方式でギャップレス再生
+        // 複数チャンクが連続で来るので、.then() で isAISpeaking=false にしない
+        // → isAISpeaking は turn_complete / interrupted で制御
         console.log(`[Core] WS audio received: ${msg.data?.length || 0} chars`);
         this.isAISpeaking = true;
         if (this.isRecording) this.stopStreamingSTT();
@@ -343,13 +358,11 @@ export class CoreController {
         this.els.voiceStatus.innerHTML = this.t('voiceStatusSpeaking');
         this.els.voiceStatus.className = 'voice-status speaking';
         if (this.isUserInteracted) {
-          this.audioManager.playPcmAudio(msg.data).then(() => {
-            this.isAISpeaking = false;
-            this.els.voiceStatus.innerHTML = this.t('voiceStatusStopped');
-            this.els.voiceStatus.className = 'voice-status stopped';
-          }).catch(() => { this.isAISpeaking = false; });
+          this.audioManager.playPcmAudio(msg.data).catch(() => {});
         } else {
-          this.isAISpeaking = false;
+          // ★ 挨拶PCMバッファリング: isUserInteracted=false時はチャンクを保留
+          console.log('[Core] PCM audio buffered: isUserInteracted=false');
+          this._pendingPcmChunks.push(msg.data);
         }
         break;
       case 'rest_audio':
@@ -371,8 +384,18 @@ export class CoreController {
         }
         break;
       case 'interrupted':
+        // ★ v2: サーバーからの interrupted で全停止 + UI復帰
         this.stopCurrentAudio();
         this.isAISpeaking = false;
+        this.els.voiceStatus.innerHTML = this.t('voiceStatusStopped');
+        this.els.voiceStatus.className = 'voice-status stopped';
+        break;
+      case 'turn_complete':
+        // ★ v2: ターン完了でAI発話状態を解除（ギャップレス再生の最終同期ポイント）
+        this.isAISpeaking = false;
+        this.els.voiceStatus.innerHTML = this.t('voiceStatusStopped');
+        this.els.voiceStatus.className = 'voice-status stopped';
+        this.resetInputState();
         break;
       case 'error':
         this.addMessage('system', `${this.t('sttError')} ${msg.message}`);
@@ -456,18 +479,25 @@ export class CoreController {
         this.ws = null;
       }
 
+      const sessionPayload = {
+        mode: this.currentMode,
+        language: this.currentLanguage,
+        dialogue_type: 'live',
+        user_id: this.getUserId()
+      };
+      console.log('[Core] session/start request:', JSON.stringify(sessionPayload));
       const res = await fetch(`${this.apiBase}/api/v2/session/start`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        // BUG2修正: バックエンドは user_id, mode, language, dialogue_type をトップレベルで期待
-        body: JSON.stringify({
-          mode: this.currentMode,
-          language: this.currentLanguage,
-          dialogue_type: 'live',
-          user_id: this.getUserId()
-        })
+        body: JSON.stringify(sessionPayload)
       });
+      if (!res.ok) {
+        const errBody = await res.text();
+        console.error(`[Core] session/start failed: ${res.status} ${res.statusText}`, errBody);
+        throw new Error(`session/start failed: ${res.status}`);
+      }
       const data = await res.json();
+      console.log('[Core] session/start response:', JSON.stringify({ session_id: data.session_id, mode: data.mode, ws_url: data.ws_url }));
       this.sessionId = data.session_id;
 
       // ★ WebSocket接続（session_id取得後）
@@ -491,7 +521,11 @@ export class CoreController {
       this.els.speakerBtn.classList.remove('disabled');
       this.els.reservationBtn.classList.remove('visible');
 
-      // ★ ack プリジェネレーションは fire-and-forget（awaitしない）
+      // ★ 挨拶音声: Gemini Live API が WebSocket 経由で PCM 音声を送信
+      // TTS API 不要 — relay.py が Gemini に挨拶テキストを送信済み
+      // 音声は handleWsMessage() の case 'audio' で受信・再生される
+
+      // ack プリジェネレーション（バックグラウンドで非同期実行）
       const ackPreGen = ackTexts.map(async (text) => {
         try {
           const ackResponse = await fetch(`${this.apiBase}/api/v2/rest/tts/synthesize`, {
@@ -508,9 +542,6 @@ export class CoreController {
         } catch (_e) { }
       });
       Promise.all(ackPreGen).catch(() => {});
-
-      // ★ 挨拶TTS（非ブロッキング — UIは既に有効）
-      this.speakTextGCP(this.t('initialGreeting')).catch(() => {});
 
     } catch (e) {
       console.error('[Session] Initialization error:', e);
@@ -729,9 +760,8 @@ export class CoreController {
             try { await this.toggleRecording(); } catch (_error) { this.showMicPrompt(); }
           }
         } else {
-          // ★ 挨拶音声を保留（raw base64）、初回操作時に audioManager.playMp3Audio で再生
-          console.log('[Core] Audio deferred: isUserInteracted=false, saving for later');
-          this._pendingGreetingAudio = data.audio;
+          // isUserInteracted=false の場合はスキップ（挨拶はGemini Live API経由）
+          console.log('[Core] TTS audio skipped: isUserInteracted=false');
           this.els.voiceStatus.innerHTML = this.t('voiceStatusStopped');
           this.els.voiceStatus.className = 'voice-status stopped';
           this.isAISpeaking = false;

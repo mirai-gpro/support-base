@@ -214,6 +214,30 @@ class LiveRelay:
                     "type": "reconnected",
                     "session_count": self.reconnect_mgr.session_count,
                 })
+            else:
+                # 初回接続: 挨拶テキストを Gemini に送信 → Gemini が音声で読み上げ
+                # （Google Cloud TTS ではなく Gemini Live API のネイティブ音声を使用）
+                greeting = self.mode_plugin.get_initial_greeting(
+                    language=self.session.language
+                )
+                try:
+                    await gemini_session.send_client_content(
+                        turns=types.Content(
+                            role="user",
+                            parts=[types.Part(
+                                text=f"次の挨拶文を自然に読み上げてください: {greeting}"
+                            )],
+                        ),
+                        turn_complete=True,
+                    )
+                    logger.info(
+                        f"[LiveRelay] Greeting sent to Gemini: "
+                        f"{greeting[:50]!r}"
+                    )
+                except Exception as e:
+                    logger.warning(
+                        f"[LiveRelay] Greeting send failed: {e}"
+                    )
 
             # 3つの非同期タスクを並行実行 (stt_stream.py L926-930)
             try:
@@ -315,13 +339,15 @@ class LiveRelay:
                 if self.reconnect_mgr.needs_reconnect:
                     return
 
+                # --- Function Calling ハンドリング（server_content の有無に関わらず先にチェック）---
+                if hasattr(response, 'tool_call') and response.tool_call:
+                    await self._handle_tool_call(
+                        response.tool_call, gemini_session, client_ws
+                    )
+                    continue
+
                 sc = response.server_content
                 if not sc:
-                    # --- Function Calling ハンドリング ---
-                    if hasattr(response, 'tool_call') and response.tool_call:
-                        await self._handle_tool_call(
-                            response.tool_call, gemini_session, client_ws
-                        )
                     continue
 
                 # --- 割り込み検知 (stt_stream.py L650-662) ---
@@ -884,6 +910,16 @@ class LiveRelay:
             language=self.session.language,
             context=context,
         )
+
+        # --- ハードコード: 応答スタイル制御 (A2Eレイテンシ最適化) ---
+        # ※ GCSプロンプトとは独立。チューニング時はここを直接編集。
+        RESPONSE_STYLE_DIRECTIVE = (
+            "\n\n【応答スタイル — 最優先で厳守】\n"
+            "・1ターンの返しは出来るだけ短く、端的に。目安30文字以内。\n"
+            "・1ターンでのユーザーへの質問は2つ以内。\n"
+            "・文節を途中で切らない。自然な区切りで完結させる。\n"
+        )
+        system_instruction += RESPONSE_STYLE_DIRECTIVE
 
         logger.info(
             f"[LiveRelay] system_instruction: len={len(system_instruction)}, "

@@ -170,7 +170,7 @@ async def start_session(req: SessionStartRequest):
         user_id=req.user_id,
     )
 
-    # 初回挨拶
+    # 初回挨拶（テキストのみ — 音声は Gemini Live API が WebSocket 経由で送信）
     greeting = plugin.get_initial_greeting(language=req.language)
 
     return SessionStartResponse(

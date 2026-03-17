@@ -50,31 +50,50 @@ class GourmetModePlugin(BaseModePlugin):
         Live API 用システムプロンプト。
 
         優先順位:
-          1. ローカル prompts/support_system_{lang}.txt
-          2. ハードコードのフォールバック
+          1. ローカル prompts/support_system_live_{lang}.txt（Live API 専用）
+          2. ローカル prompts/support_system_{lang}.txt（REST API 用、フォールバック）
+          3. ハードコードのフォールバック
         """
+        import os
         prompt = ""
         source = "none"
 
-        # ローカルファイルを直接読み込み (GCS より優先)
-        import os
-        prompt_file = os.path.join(
-            os.path.dirname(__file__), "..", "..", "..", "prompts", f"support_system_{language}.txt"
+        # 1. Live API 専用プロンプトを優先読み込み
+        live_prompt_file = os.path.join(
+            os.path.dirname(__file__), "..", "..", "..", "prompts",
+            f"support_system_live_{language}.txt"
         )
-        prompt_file = os.path.normpath(prompt_file)
+        live_prompt_file = os.path.normpath(live_prompt_file)
         try:
-            with open(prompt_file, "r", encoding="utf-8") as f:
+            with open(live_prompt_file, "r", encoding="utf-8") as f:
                 prompt = f.read().strip()
             if prompt and not prompt.startswith("エラー:"):
-                source = f"local:{prompt_file}"
+                source = f"local-live:{live_prompt_file}"
         except FileNotFoundError:
-            logger.warning(f"[GourmetPlugin] ローカルプロンプト未発見: {prompt_file}")
+            logger.info(f"[GourmetPlugin] Live API プロンプト未発見: {live_prompt_file}")
         except Exception as e:
-            logger.warning(f"[GourmetPlugin] ローカルプロンプト読み込み失敗: {e}")
+            logger.warning(f"[GourmetPlugin] Live API プロンプト読み込み失敗: {e}")
 
-        # フォールバック: ローカルファイルが読めない場合
+        # 2. フォールバック: REST API 用プロンプト
         if not prompt or prompt.startswith("エラー:"):
-            logger.warning("[GourmetPlugin] ローカルプロンプト使用不可 → フォールバック使用")
+            rest_prompt_file = os.path.join(
+                os.path.dirname(__file__), "..", "..", "..", "prompts",
+                f"support_system_{language}.txt"
+            )
+            rest_prompt_file = os.path.normpath(rest_prompt_file)
+            try:
+                with open(rest_prompt_file, "r", encoding="utf-8") as f:
+                    prompt = f.read().strip()
+                if prompt and not prompt.startswith("エラー:"):
+                    source = f"local-rest:{rest_prompt_file}"
+            except FileNotFoundError:
+                logger.warning(f"[GourmetPlugin] REST プロンプト未発見: {rest_prompt_file}")
+            except Exception as e:
+                logger.warning(f"[GourmetPlugin] REST プロンプト読み込み失敗: {e}")
+
+        # 3. ハードコードフォールバック
+        if not prompt or prompt.startswith("エラー:"):
+            logger.warning("[GourmetPlugin] プロンプト使用不可 → フォールバック使用")
             prompt = self._fallback_prompt(language)
             source = "fallback"
 
